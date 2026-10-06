@@ -26,7 +26,7 @@ public class CoreWorkflowService {
     }
     @Transactional
     public void createYear(String code, int startYear) {
-        if (!code.equals(startYear + "-" + (startYear + 1))) throw new IllegalArgumentException("Mã năm học không hợp lệ");
+        if (code == null || startYear < 2020 || startYear > 2100 || !code.equals(startYear + "-" + (startYear + 1))) throw new IllegalArgumentException("Mã năm học không hợp lệ");
         jdbc.update("INSERT INTO academic_years(id,code,start_year,end_year) VALUES(?,?,?,?)",
                 UUID.randomUUID().toString(), code, startYear, startYear + 1);
     }
@@ -38,6 +38,20 @@ public class CoreWorkflowService {
         if (number < 1 || number > 3) throw new IllegalArgumentException("Học kỳ phải từ 1 đến 3");
         jdbc.update("INSERT INTO semesters(id,academic_year_id,number) VALUES(?,?,?)",
                 UUID.randomUUID().toString(), yearId, number);
+    }
+    @Transactional
+    public void updateYear(String id, String code, int startYear) {
+        if (code == null || startYear < 2020 || startYear > 2100 || !code.equals(startYear + "-" + (startYear + 1)))
+            throw new IllegalArgumentException("Mã năm học không hợp lệ");
+        if (jdbc.update("UPDATE academic_years SET code=?,start_year=?,end_year=? WHERE id=?", code,startYear,startYear+1,id) == 0)
+            throw new IllegalArgumentException("Không tìm thấy năm học");
+    }
+    @Transactional
+    public void updateSemester(String id, String yearId, int number) {
+        if (number < 1 || number > 3) throw new IllegalArgumentException("Học kỳ phải từ 1 đến 3");
+        // Keep the academic year and every referencing round stable during an edit.
+        if (jdbc.update("UPDATE semesters SET number=? WHERE id=? AND academic_year_id=?", number,id,yearId) == 0)
+            throw new IllegalArgumentException("Không tìm thấy học kỳ thuộc năm học đã chọn");
     }
     public List<Map<String,Object>> rounds() {
         return jdbc.queryForList("SELECT r.id,r.code,r.name,r.active,r.semester_id,r.registration_opens_at,r.registration_closes_at,r.workflow_definition_id,s.number AS semester_number,y.code AS academic_year_code FROM thesis_rounds r LEFT JOIN semesters s ON s.id=r.semester_id LEFT JOIN academic_years y ON y.id=s.academic_year_id ORDER BY y.start_year DESC,s.number,r.code");

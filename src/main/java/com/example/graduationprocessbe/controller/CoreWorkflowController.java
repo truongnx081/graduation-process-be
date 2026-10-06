@@ -48,6 +48,14 @@ public class CoreWorkflowController {
     public ResponseEntity<ApiResponseWrapper<Void>> year(@RequestBody YearInput input) { core.createYear(input.code(),input.startYear()); return ok(null); }
     @PostMapping("/semesters") @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponseWrapper<Void>> semester(@RequestBody SemesterInput input) { core.createSemester(input.academicYearId(),input.number()); return ok(null); }
+    @PutMapping("/years/{id}") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<Void>> updateYear(@PathVariable String id,@RequestBody YearInput input) {
+        core.updateYear(id,input.code(),input.startYear()); return ok(null);
+    }
+    @PutMapping("/semesters/{id}") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<Void>> updateSemester(@PathVariable String id,@RequestBody SemesterInput input) {
+        core.updateSemester(id,input.academicYearId(),input.number()); return ok(null);
+    }
     @PostMapping("/rounds") @PreAuthorize("hasRole('ADMIN')")
     public ResponseEntity<ApiResponseWrapper<Void>> round(@RequestBody RoundInput input) {
         core.createRound(input.code(),input.name(),input.semesterId(),input.registrationOpensAt(),input.registrationClosesAt(), input.active() == null || input.active()); return ok(null);

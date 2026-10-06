@@ -1000,3 +1000,30 @@ BEGIN
     CREATE UNIQUE INDEX IF NOT EXISTS uq_thesis_rounds_semester ON thesis_rounds(semester_id);
     INSERT INTO app_seed_versions(version) VALUES('core-workflow-v18-one-round-per-semester');
 END $one_round_per_semester$;
+
+-- Merge navigation only: preserve academic_years, semesters and all referencing IDs.
+DO $academic_calendar$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261006,19);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='core-workflow-v19-academic-calendar') THEN RETURN; END IF;
+    IF NOT EXISTS(SELECT 1 FROM menus WHERE code='nam-hoc') THEN
+        RAISE EXCEPTION 'Academic year menu must exist before merging the calendar';
+    END IF;
+    -- Preserve existing semester viewers when consolidating both screens.
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+      SELECT gen_random_uuid()::text,a.role_id,target.id,now(),now()
+      FROM role_allowed_permissions a JOIN permissions old ON old.id=a.permission_id
+      CROSS JOIN permissions target WHERE old.code='VIEW_HOC_KY' AND target.code='VIEW_NAM_HOC'
+      ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+      SELECT gen_random_uuid()::text,g.role_id,target.id,now(),now()
+      FROM role_permissions g JOIN permissions old ON old.id=g.permission_id
+      CROSS JOIN permissions target WHERE old.code='VIEW_HOC_KY' AND target.code='VIEW_NAM_HOC'
+      ON CONFLICT(role_id,permission_id) DO NOTHING;
+    UPDATE menus SET label='Năm học & Học kỳ',path='/rounds/academic-years',last_modified_date=now() WHERE code='nam-hoc';
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='nam-hoc'),last_modified_date=now()
+      WHERE parent_id=(SELECT id FROM menus WHERE code='hoc-ky');
+    UPDATE menus SET active=false,last_modified_date=now() WHERE code='hoc-ky';
+    UPDATE permissions SET enabled=false,last_modified_date=now() WHERE code='VIEW_HOC_KY';
+    INSERT INTO app_seed_versions(version) VALUES('core-workflow-v19-academic-calendar');
+END $academic_calendar$;
