@@ -823,27 +823,6 @@ BEGIN
     INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
       SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
       WHERE r.role_code='ADMIN' AND p.code='VIEW_CAU_HINH_QUY_TRINH' ON CONFLICT(role_id,permission_id) DO NOTHING;
-    INSERT INTO academic_years(id,code,start_year,end_year)
-      VALUES('core-year-2026','2026-2027',2026,2027) ON CONFLICT(code) DO NOTHING;
-    INSERT INTO semesters(id,academic_year_id,number)
-      SELECT 'core-sem-2026-1',id,1 FROM academic_years WHERE code='2026-2027'
-      ON CONFLICT(academic_year_id,number) DO NOTHING;
-    INSERT INTO workflow_templates(id,name,version,status)
-      VALUES('core-template-v1','Quy trình ĐATN cơ bản',1,'DRAFT') ON CONFLICT(id) DO NOTHING;
-    INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days)
-      SELECT gen_random_uuid()::text,'core-template-v1',v.step_key,v.label,v.sort_order,v.kind,v.assignee_role,v.due_days
-      FROM (VALUES
-        ('submitProposal','Nộp đề cương',1,'SUBMIT','STUDENT',NULL::integer),
-        ('reviewProposal','Khoa duyệt đề cương',2,'REVIEW','FACULTY_STAFF',5),
-        ('midtermReport','Báo cáo giữa kỳ với GVHD',3,'SUBMIT','STUDENT',NULL::integer),
-        ('reviewMidterm','GVHD nhận xét giữa kỳ',4,'REVIEW','LECTURER',5),
-        ('finalReport','Nộp báo cáo cuối',5,'SUBMIT','STUDENT',NULL::integer),
-        ('similarityCheck','Kiểm tra trùng lắp',6,'REVIEW','FACULTY_STAFF',3),
-        ('defense','Bảo vệ đồ án',7,'TASK','COMMITTEE',NULL::integer),
-        ('finalCorrection','Hiệu chỉnh sau bảo vệ',8,'SUBMIT','STUDENT',NULL::integer),
-        ('advisorFinalReview','GVHD xác nhận hoàn thành',9,'REVIEW','LECTURER',5)
-      ) v(step_key,label,sort_order,kind,assignee_role,due_days)
-      ON CONFLICT(template_id,step_key) DO NOTHING;
     INSERT INTO app_seed_versions(version) VALUES('core-workflow-v11');
 END $core$;
 
@@ -1027,3 +1006,159 @@ BEGIN
     UPDATE permissions SET enabled=false,last_modified_date=now() WHERE code='VIEW_HOC_KY';
     INSERT INTO app_seed_versions(version) VALUES('core-workflow-v19-academic-calendar');
 END $academic_calendar$;
+
+-- The current DATN baseline is a new draft. Earlier published definitions and
+-- running instances remain untouched for their original semesters.
+DO $workflow_v20$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261007,20);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='core-workflow-v20-proposal-first') THEN RETURN; END IF;
+    ALTER TABLE workflow_steps ADD COLUMN IF NOT EXISTS next_key varchar(60);
+    ALTER TABLE workflow_steps ADD COLUMN IF NOT EXISTS reject_key varchar(60);
+    CREATE TABLE IF NOT EXISTS defense_schedules (
+        id varchar(36) PRIMARY KEY,
+        thesis_id varchar(36) NOT NULL UNIQUE REFERENCES theses(id),
+        defense_at timestamptz NOT NULL,
+        room varchar(120) NOT NULL,
+        council_name varchar(150) NOT NULL,
+        notes text,
+        published_by varchar(36) NOT NULL REFERENCES users(id),
+        published_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS workflow_mail_outbox (
+        id varchar(36) PRIMARY KEY,
+        round_id varchar(36) REFERENCES thesis_rounds(id),
+        step_key varchar(60),
+        event_key varchar(60) NOT NULL,
+        recipient_email varchar(255) NOT NULL,
+        subject varchar(255) NOT NULL,
+        body text NOT NULL,
+        status varchar(20) NOT NULL DEFAULT 'PENDING',
+        attempts integer NOT NULL DEFAULT 0,
+        last_error text,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        sent_at timestamptz,
+        UNIQUE(round_id,step_key,event_key,recipient_email)
+    );
+    INSERT INTO workflow_templates(id,name,version,status)
+      VALUES('core-template-v2','Quy trình ĐATN từ đề cương đến lịch bảo vệ',2,'DRAFT')
+      ON CONFLICT(id) DO NOTHING;
+    INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days,next_key,reject_key)
+      SELECT gen_random_uuid()::text,'core-template-v2',v.step_key,v.label,v.sort_order,v.kind,v.assignee_role,v.due_days,v.next_key,v.reject_key
+      FROM (VALUES
+        ('submitProposal','Sinh viên nộp đề cương',1,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('reviewProposal','Khoa kiểm tra và phản hồi đề cương',2,'REVIEW','FACULTY_STAFF',5,NULL::varchar,'submitProposal'),
+        ('reviseProposal','Sinh viên hoàn thiện đề cương theo phản hồi',3,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('advisorSignature','Giảng viên xác nhận đề cương',4,'REVIEW','LECTURER',5,NULL::varchar,'reviseProposal'),
+        ('submitSignedProposal','Sinh viên nộp đề cương đã xác nhận',5,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('facultyFinalApproval','Khoa duyệt đề cương chính thức',6,'REVIEW','FACULTY_STAFF',5,NULL::varchar,'reviseProposal'),
+        ('registerThesis','Sinh viên xác nhận đăng ký ĐATN',7,'TASK','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('confirmGuidance','Giảng viên xác nhận hướng dẫn ĐATN',8,'REVIEW','LECTURER',5,NULL::varchar,'registerThesis'),
+        ('midtermReport','Sinh viên nộp báo cáo giữa kỳ',9,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('reviewMidterm','Giảng viên phản hồi báo cáo giữa kỳ',10,'REVIEW','LECTURER',5,NULL::varchar,'midtermReport'),
+        ('finalReport','Sinh viên nộp báo cáo đồ án cho GVHD',11,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('advisorFinalReview','GVHD nhận xét báo cáo đồ án',12,'REVIEW','LECTURER',5,NULL::varchar,'finalReport'),
+        ('submitCouncil','Sinh viên nộp báo cáo cho Hội đồng',13,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('councilAccept','Hội đồng tiếp nhận hồ sơ bảo vệ',14,'REVIEW','COMMITTEE',5,NULL::varchar,'submitCouncil'),
+        ('scheduleDefense','Khoa công bố lịch bảo vệ',15,'TASK','FACULTY_STAFF',5,NULL::varchar,NULL::varchar)
+      ) v(step_key,label,sort_order,kind,assignee_role,due_days,next_key,reject_key)
+      ON CONFLICT(template_id,step_key) DO NOTHING;
+    INSERT INTO app_seed_versions(version) VALUES('core-workflow-v20-proposal-first');
+END $workflow_v20$;
+
+DO $mail_v21$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261004,21);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='core-workflow-v21-mail-settings') THEN RETURN; END IF;
+    CREATE TABLE IF NOT EXISTS round_mail_settings (
+        round_id varchar(36) PRIMARY KEY REFERENCES thesis_rounds(id),
+        remind_before_hours integer NOT NULL DEFAULT 48 CHECK(remind_before_hours BETWEEN 0 AND 720),
+        remind_after_hours integer NOT NULL DEFAULT 24 CHECK(remind_after_hours BETWEEN 0 AND 720),
+        updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS round_mail_campaigns (
+        id varchar(36) PRIMARY KEY,
+        round_id varchar(36) NOT NULL REFERENCES thesis_rounds(id),
+        subject varchar(255) NOT NULL,
+        message text NOT NULL,
+        scheduled_at timestamptz NOT NULL,
+        status varchar(20) NOT NULL DEFAULT 'SCHEDULED',
+        recipient_count integer NOT NULL DEFAULT 0,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        queued_at timestamptz
+    );
+    CREATE INDEX IF NOT EXISTS ix_workflow_mail_pending ON workflow_mail_outbox(status,created_at);
+    CREATE INDEX IF NOT EXISTS ix_round_mail_campaign_due ON round_mail_campaigns(status,scheduled_at);
+    INSERT INTO app_seed_versions(version) VALUES('core-workflow-v21-mail-settings');
+END $mail_v21$;
+
+-- Remove only obsolete starter records that have never been used by a round or case.
+DO $starter_cleanup_v22$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261004,22);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='core-workflow-v22-starter-cleanup') THEN RETURN; END IF;
+    DELETE FROM workflow_steps WHERE template_id='core-template-v1'
+      AND EXISTS(SELECT 1 FROM workflow_templates WHERE id='core-template-v1' AND status='DRAFT')
+      AND NOT EXISTS(SELECT 1 FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id WHERE wt.id='core-template-v1');
+    DELETE FROM workflow_templates WHERE id='core-template-v1' AND status='DRAFT'
+      AND NOT EXISTS(SELECT 1 FROM workflow_steps WHERE template_id='core-template-v1');
+    DELETE FROM semesters WHERE academic_year_id='core-year-2026'
+      AND NOT EXISTS(SELECT 1 FROM thesis_rounds WHERE semester_id=semesters.id);
+    DELETE FROM academic_years WHERE id='core-year-2026'
+      AND NOT EXISTS(SELECT 1 FROM semesters WHERE academic_year_id='core-year-2026');
+    INSERT INTO app_seed_versions(version) VALUES('core-workflow-v22-starter-cleanup');
+END $starter_cleanup_v22$;
+
+DO $mail_retry_v23$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261004,23);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='core-workflow-v23-mail-retry') THEN RETURN; END IF;
+    ALTER TABLE workflow_mail_outbox ADD COLUMN IF NOT EXISTS next_attempt_at timestamptz NOT NULL DEFAULT now();
+    INSERT INTO app_seed_versions(version) VALUES('core-workflow-v23-mail-retry');
+END $mail_retry_v23$;
+
+-- Local bootstrap: admin / admin123 when no APP_BOOTSTRAP_PASSWORD is supplied.
+-- Run after account migrations. Never reset existing credentials or role assignments.
+DO $bootstrap_admin_v24$
+DECLARE
+    admin_id varchar(36);
+    admin_role_id varchar(36);
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261004,24);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='bootstrap-admin-v24') THEN RETURN; END IF;
+    IF NOT EXISTS(SELECT 1 FROM users WHERE username='admin') THEN
+        SELECT id INTO STRICT admin_role_id FROM roles WHERE role_code='ADMIN';
+        admin_id := gen_random_uuid()::text;
+        INSERT INTO users(id,username,email,full_name,password_hash,user_type,status,created_date,last_modified_date)
+        VALUES(admin_id,'admin','admin@graduation.local','Quản trị viên Nguyễn Văn An',
+            COALESCE(NULLIF(current_setting('app.bootstrap.password_hash',true),''),
+                '$2a$10$ctVd2m8G2Nc2RRpYTyl6zOtBbasSqZsDt9WF1ysgY3z005.lDPSl.'),
+            'ADMIN','ACTIVE',now(),now());
+        INSERT INTO user_roles(id,user_id,role_id,thesis_round_id,created_date,last_modified_date)
+        VALUES(gen_random_uuid()::text,admin_id,admin_role_id,NULL,now(),now());
+    END IF;
+    INSERT INTO app_seed_versions(version) VALUES('bootstrap-admin-v24');
+END $bootstrap_admin_v24$;
+
+-- Separate submission windows and email operations from the round directory.
+DO $round_schedule_v25$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261007,26);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='round-schedule-menu-v25') THEN RETURN; END IF;
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'moc-nop-thong-bao','Mốc nộp & thông báo','ScheduleOutlined','/rounds/schedule',
+        (SELECT id FROM menus WHERE code='dot-do-an'),74,true,now(),now()) ON CONFLICT(code) DO NOTHING;
+    INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'VIEW_MOC_NOP_THONG_BAO','Truy cập / Xem: Mốc nộp & thông báo',
+        'MENU','moc-nop-thong-bao','VIEW',true,now(),now()) ON CONFLICT(code) DO NOTHING;
+    UPDATE menus SET permission_code='VIEW_MOC_NOP_THONG_BAO' WHERE code='moc-nop-thong-bao';
+    -- These settings use the existing ADMIN-only API endpoints.
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code='ADMIN' AND p.code='VIEW_MOC_NOP_THONG_BAO' ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code='ADMIN' AND p.code='VIEW_MOC_NOP_THONG_BAO' ON CONFLICT(role_id,permission_id) DO NOTHING;
+    UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code='ADMIN';
+    INSERT INTO app_seed_versions(version) VALUES('round-schedule-menu-v25');
+END $round_schedule_v25$;

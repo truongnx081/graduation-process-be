@@ -23,4 +23,7 @@ public class CreateThesisRequest {
     private String phaseId;
 
     private String partnerStudentId;
+
+    @NotBlank(message = "Cần nội dung hoặc liên kết đề cương")
+    private String proposalContent;
 }
