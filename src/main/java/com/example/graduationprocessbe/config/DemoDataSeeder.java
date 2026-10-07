@@ -7,21 +7,35 @@ import com.example.graduationprocessbe.repository.UserRepository;
 import com.example.graduationprocessbe.service.AuditLogService;
 import com.example.graduationprocessbe.service.CoreWorkflowService;
 import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.RuntimeService;
 import org.flowable.engine.TaskService;
+import org.flowable.task.api.Task;
+import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.time.Instant;
+import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
-import java.time.ZoneOffset;
+import java.time.ZoneId;
+import java.time.temporal.ChronoUnit;
+import java.util.ArrayList;
+import java.util.Date;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Function;
+import java.util.stream.Collectors;
 
-/** Optional, repeat-safe local demonstration data; never runs unless app.seed-demo=true. */
+/** Optional demo catalog and real, resumable Flowable scenarios. */
+@Slf4j
 @Component
 @RequiredArgsConstructor
 public class DemoDataSeeder {
+    private static final String VERSION = "demo-comprehensive-v5";
     private final JdbcTemplate jdbc;
     private final CoreWorkflowService core;
     private final UserRepository users;
@@ -31,98 +45,139 @@ public class DemoDataSeeder {
     private final AuditLogService audit;
 
     @Transactional
-    public void seed() {
-        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM app_seed_versions WHERE version='demo-core-v1')",Boolean.class))) {
-            seedWindows(); seedGroupWorkflowVersion(); return;
+    public void seed() throws IOException {
+        jdbc.execute("SELECT pg_advisory_xact_lock(20261007, 25)");
+        if (Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM app_seed_versions WHERE version=?)", Boolean.class, VERSION))) return;
+        jdbc.execute(new ClassPathResource("seed_demo_data.sql").getContentAsString(StandardCharsets.UTF_8));
+        var steps = core.steps("core-template-v2").stream()
+                .collect(Collectors.toMap(s -> (String) s.get("step_key"), Function.identity()));
+        var scenarios = jdbc.queryForList("SELECT p.*,r.id AS round_id,r.workflow_definition_id " +
+                "FROM demo_case_plan p JOIN demo_rounds r ON r.slot=p.round_slot ORDER BY p.case_no");
+        int created = 0;
+        for (var scenario : scenarios) {
+            if (seedCase(scenario, steps)) created++;
         }
-        OffsetDateTime now=OffsetDateTime.now(ZoneOffset.UTC);
-        int start=now.getMonthValue()>=8?now.getYear():now.getYear()-1;
-        String yearCode=start+"-"+(start+1);
-        jdbc.update("INSERT INTO departments(id,dept_code,dept_name,created_date,last_modified_date) VALUES(?,?,?,now(),now()) ON CONFLICT(dept_code) DO NOTHING",
-                UUID.randomUUID().toString(),"KH-KTTT","Khoa Khoa học và Kỹ thuật Thông tin");
-        jdbc.update("INSERT INTO academic_years(id,code,start_year,end_year) VALUES(?,?,?,?) ON CONFLICT(code) DO NOTHING",
-                UUID.randomUUID().toString(),yearCode,start,start+1);
-        String yearId=jdbc.queryForObject("SELECT id FROM academic_years WHERE code=?",String.class,yearCode);
-        int semester=now.getMonthValue()>=8 || now.getMonthValue()<=1 ? 1 : 2;
-        jdbc.update("INSERT INTO semesters(id,academic_year_id,number) VALUES(?,?,?) ON CONFLICT(academic_year_id,number) DO NOTHING",
-                UUID.randomUUID().toString(),yearId,semester);
-        String semesterId=jdbc.queryForObject("SELECT id FROM semesters WHERE academic_year_id=? AND number=?",String.class,yearId,semester);
-        String roundCode="DEMO-"+yearCode+"-HK"+semester;
-        String roundId=UUID.randomUUID().toString();
-        String definition=jdbc.queryForObject("SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v1'",String.class);
-        if (definition==null) definition=core.publish("core-template-v1");
-        jdbc.update("INSERT INTO thesis_rounds(id,code,name,active,semester_id,registration_opens_at,registration_closes_at,workflow_definition_id,created_date,last_modified_date) VALUES(?,?,?,true,?,?,?, ?,now(),now())",
-                roundId,roundCode,"Đợt ĐATN mẫu - HK"+semester+" "+yearCode,semesterId,now.minusDays(3),now.plusDays(14),definition);
-        String lecturer=users.findByUsername("lecturer").orElseThrow().getId();
-        String lecturer2=users.findByUsername("lecturer2").orElseThrow().getId();
-        jdbc.update("UPDATE users SET phone='0900000001' WHERE id=? AND phone IS NULL",lecturer);
-        jdbc.update("UPDATE users SET phone='0900000002' WHERE id=? AND phone IS NULL",lecturer2);
-        jdbc.update("INSERT INTO round_lecturers(id,round_id,lecturer_id,orientation,active) VALUES(?,?,?,?,true)",
-                UUID.randomUUID().toString(),roundId,lecturer,"Ứng dụng web, tự động hóa quy trình, cơ sở dữ liệu");
-        jdbc.update("INSERT INTO round_lecturers(id,round_id,lecturer_id,orientation,active) VALUES(?,?,?,?,true)",
-                UUID.randomUUID().toString(),roundId,lecturer2,"Khoa học dữ liệu, học máy và phân tích dữ liệu");
-        String reviewer=users.findByUsername("khoa").orElseThrow().getId();
-        sampleCase(roundId,definition,"student",lecturer,"Hệ thống quản lý quy trình ĐATN",
-                "Đề cương mẫu: khảo sát, thiết kế và hiện thực hệ thống quản lý ĐATN.",false,reviewer);
-        sampleCase(roundId,definition,"student2",lecturer2,"Phân tích dữ liệu học tập",
-                "Đề cương mẫu: mô hình phân tích tiến độ học tập và cảnh báo sớm.",true,reviewer);
-        // student3 remains unregistered so the full registration screen can be tried manually.
-        jdbc.update("INSERT INTO app_seed_versions(version) VALUES('demo-core-v1')");
-        seedWindows();
-        seedGroupWorkflowVersion();
+        if (scenarios.size() < 15) log.warn("Demo: skipped scenarios for semesters already occupied by other rounds.");
+        jdbc.update("INSERT INTO app_seed_versions(version) VALUES(?)", VERSION);
+        log.info("Demo initialization completed: {} new cases, {} scenarios available.", created, scenarios.size());
     }
 
-    private void seedGroupWorkflowVersion() {
-        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM app_seed_versions WHERE version='demo-core-v3-group-workflow')",Boolean.class))) return;
-        String roundId=jdbc.queryForObject("SELECT id FROM thesis_rounds WHERE code LIKE 'DEMO-%' ORDER BY created_date DESC LIMIT 1",String.class);
-        String draft=core.createDraft("Quy trình ĐATN mẫu cho nhóm tối đa 2 sinh viên","core-template-v1");
-        core.publish(draft);
-        core.assignTemplate(roundId,draft);
-        jdbc.update("INSERT INTO app_seed_versions(version) VALUES('demo-core-v3-group-workflow')");
-    }
-
-    private void seedWindows() {
-        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM app_seed_versions WHERE version='demo-core-v2-windows')",Boolean.class))) return;
-        String roundId=jdbc.queryForObject("SELECT id FROM thesis_rounds WHERE code LIKE 'DEMO-%' ORDER BY created_date DESC LIMIT 1",String.class);
-        OffsetDateTime now=OffsetDateTime.now(ZoneOffset.UTC);
-        core.setWindow(roundId,"submitProposal",now.minusDays(3),now.plusDays(21));
-        core.setWindow(roundId,"midtermReport",now.minusDays(1),now.plusDays(30));
-        core.setWindow(roundId,"finalReport",now.plusDays(31),now.plusDays(60));
-        core.setWindow(roundId,"finalCorrection",now.plusDays(61),now.plusDays(90));
-        jdbc.update("INSERT INTO app_seed_versions(version) VALUES('demo-core-v2-windows')");
-    }
-
-    private void sampleCase(String roundId,String definition,String studentName,String lecturerId,
-                            String title,String proposal,boolean advance,String reviewerId) {
-        User student=users.findByUsername(studentName).orElseThrow();
-        User lecturer=users.findById(lecturerId).orElseThrow();
-        Thesis thesis=new Thesis(); thesis.setTitle(title); thesis.setDescription(proposal);
-        thesis.setStudent(student); thesis.setLecturer(lecturer); thesis.setPhaseId(roundId);
-        thesis=theses.saveAndFlush(thesis);
-        jdbc.update("INSERT INTO members(thesis_id,user_id,thesis_round_id) VALUES(?,?,?)",
-                thesis.getId(),student.getId(),roundId);
-        var instance=runtime.startProcessInstanceById(definition,thesis.getId(),Map.of(
-                "thesisId",thesis.getId(),"studentId",student.getId(),"studentIds",student.getId(),"lecturerId",lecturerId,"studentEmail",student.getEmail()));
+    private boolean seedCase(Map<String, Object> plan, Map<String, Map<String, Object>> steps) {
+        String roundId = (String) plan.get("round_id");
+        User student = user((String) plan.get("student_username"));
+        User lecturer = user((String) plan.get("lecturer_username"));
+        var members = new ArrayList<User>();
+        members.add(student);
+        if (plan.get("partner_username") instanceof String partner) members.add(user(partner));
+        for (User member : members) {
+            if (Boolean.TRUE.equals(jdbc.queryForObject(
+                    "SELECT EXISTS(SELECT 1 FROM members WHERE thesis_round_id=? AND user_id=?)",
+                    Boolean.class, roundId, member.getId()))) return false;
+        }
+        Thesis thesis = new Thesis();
+        thesis.setTitle((String) plan.get("title"));
+        thesis.setDescription((String) plan.get("summary"));
+        thesis.setStudent(student);
+        thesis.setLecturer(lecturer);
+        thesis.setPhaseId(roundId);
+        thesis = theses.saveAndFlush(thesis);
+        for (User member : members) {
+            jdbc.update("INSERT INTO members(thesis_id,user_id,thesis_round_id) VALUES(?,?,?)",
+                    thesis.getId(), member.getId(), roundId);
+        }
+        var instance = runtime.startProcessInstanceById((String) plan.get("workflow_definition_id"),
+                thesis.getId(), Map.of("thesisId", thesis.getId(), "studentId", student.getId(),
+                        "studentIds", members.stream().map(User::getId).collect(Collectors.joining(",")),
+                        "lecturerId", lecturer.getId(), "studentEmail", student.getEmail()));
         thesis.setProcessInstanceId(instance.getId());
-        thesis.setCurrentStatus("reviewProposal");
-        jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content) VALUES(?,?,?,?,?)",
-                UUID.randomUUID().toString(),thesis.getId(),"submitProposal",student.getId(),proposal);
-        audit.record(instance.getId(),student,"START_PROCESS","reviewProposal",Map.of("thesisId",thesis.getId()));
-        if (advance) {
-            var review=tasks.createTaskQuery().processInstanceId(instance.getId()).singleResult();
-            tasks.complete(review.getId(),Map.of("approved",false));
-            jdbc.update("INSERT INTO thesis_feedback(id,thesis_id,step_key,reviewer_id,approved,comment) VALUES(?,?,?,?,false,?)",
-                    UUID.randomUUID().toString(),thesis.getId(),"reviewProposal",reviewerId,"Bổ sung phạm vi dữ liệu và phương pháp đánh giá.");
-            var resubmit=tasks.createTaskQuery().processInstanceId(instance.getId()).singleResult();
-            tasks.complete(resubmit.getId());
-            jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content) VALUES(?,?,?,?,?)",
-                    UUID.randomUUID().toString(),thesis.getId(),"submitProposal",student.getId(),proposal+" Đã bổ sung phạm vi và phương pháp đánh giá.");
-            review=tasks.createTaskQuery().processInstanceId(instance.getId()).singleResult();
-            tasks.complete(review.getId(),Map.of("approved",true));
-            jdbc.update("INSERT INTO thesis_feedback(id,thesis_id,step_key,reviewer_id,approved,comment) VALUES(?,?,?,?,true,?)",
-                    UUID.randomUUID().toString(),thesis.getId(),"reviewProposal",reviewerId,"Đề cương đạt yêu cầu.");
-            thesis.setCurrentStatus("midtermReport");
+        theses.saveAndFlush(thesis);
+        audit.record(instance.getId(), student, "DEMO_CREATE", "submitProposal",
+                Map.of("title", thesis.getTitle(), "demo", true));
+
+        boolean rejectOnce = Boolean.TRUE.equals(plan.get("reject_proposal"));
+        String target = (String) plan.get("target_step");
+        for (int count = 0; count < 40; count++) {
+            Task task = tasks.createTaskQuery().processInstanceId(instance.getId()).singleResult();
+            if (task == null) {
+                if (!"COMPLETED".equals(target)) throw new IllegalStateException("Demo ended before " + target);
+                thesis.setCurrentStatus("COMPLETED");
+                theses.saveAndFlush(thesis);
+                return true;
+            }
+            String key = task.getTaskDefinitionKey();
+            if (key.equals(target) && !rejectOnce) {
+                int overdue = ((Number) plan.get("overdue_days")).intValue();
+                if (overdue > 0) tasks.setDueDate(task.getId(), Date.from(Instant.now().minus(overdue, ChronoUnit.DAYS)));
+                thesis.setCurrentStatus(key);
+                theses.saveAndFlush(thesis);
+                return true;
+            }
+            boolean approved = !(rejectOnce && "reviewProposal".equals(key));
+            completeDemoTask(thesis, task, steps.get(key), approved, plan);
+            if (!approved) rejectOnce = false;
         }
-        theses.save(thesis);
+        throw new IllegalStateException("Demo workflow did not reach " + target);
+    }
+
+    private void completeDemoTask(Thesis thesis, Task task, Map<String, Object> step,
+                                  boolean approved, Map<String, Object> plan) {
+        if (step == null) throw new IllegalStateException("Missing demo workflow step: " + task.getTaskDefinitionKey());
+        String key = task.getTaskDefinitionKey();
+        User actor = switch ((String) step.get("assignee_role")) {
+            case "STUDENT" -> thesis.getStudent();
+            case "LECTURER" -> thesis.getLecturer();
+            case "FACULTY_STAFF" -> user("khoa");
+            case "COMMITTEE" -> user("committee");
+            default -> throw new IllegalStateException("Unsupported demo role");
+        };
+        String content = submissionContent(key, thesis);
+        String comment = approved ? "Đã kiểm tra " + step.get("label") + ". Nội dung đáp ứng yêu cầu; đồng ý chuyển bước."
+                : "Cần làm rõ phạm vi dữ liệu, bổ sung tiêu chí đánh giá và kế hoạch thực hiện theo tuần. Vui lòng sửa và nộp lại đề cương.";
+        if ("SUBMIT".equals(step.get("kind"))) {
+            jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content) VALUES(?,?,?,?,?)",
+                    UUID.randomUUID().toString(), thesis.getId(), key, actor.getId(), content);
+        } else if ("REVIEW".equals(step.get("kind"))) {
+            jdbc.update("INSERT INTO thesis_feedback(id,thesis_id,step_key,reviewer_id,approved,comment) VALUES(?,?,?,?,?,?)",
+                    UUID.randomUUID().toString(), thesis.getId(), key, actor.getId(), approved, comment);
+        }
+        if ("confirmGuidance".equals(key)) {
+            thesis.setGuidanceApproved(approved);
+            thesis.setGuidanceRespondedAt(LocalDateTime.now());
+            thesis.setGuidanceComment(comment);
+        }
+        if ("scheduleDefense".equals(key)) {
+            var defenseAt = OffsetDateTime.now(ZoneId.of("Asia/Ho_Chi_Minh"))
+                    .plusDays("past".equals(plan.get("round_slot")) ? -150 : 14)
+                    .withHour(8).withMinute(30).withSecond(0).withNano(0);
+            jdbc.update("INSERT INTO defense_schedules(id,thesis_id,defense_at,room,council_name,notes,published_by) VALUES(?,?,?,?,?,?,?)",
+                    UUID.randomUUID().toString(), thesis.getId(), defenseAt, "Phòng B.203",
+                    "Hội đồng ĐATN - Công nghệ Thông tin",
+                    "Lịch minh họa: trình bày 15 phút, hỏi đáp 10 phút. Chuẩn bị slide và bản chạy thử.", actor.getId());
+        }
+        tasks.setAssignee(task.getId(), actor.getId());
+        tasks.complete(task.getId(), Map.of("approved", approved, "comment", comment, "content", content));
+        audit.record(thesis.getProcessInstanceId(), actor, "DEMO_COMPLETE_TASK", key,
+                Map.of("demo", true, "approved", approved, "comment", comment));
+    }
+
+    private String submissionContent(String key, Thesis thesis) {
+        String detail = switch (key) {
+            case "midtermReport" -> "Tiến độ 60%: hoàn tất khảo sát, thiết kế dữ liệu và chức năng cốt lõi. " +
+                    "Đã kiểm thử luồng chính. Công việc tiếp theo: hoàn thiện giao diện, kiểm thử tích hợp và đo hiệu năng.";
+            case "finalReport" -> "Đã hoàn thành các chức năng theo đề cương, kiểm thử phân quyền và xử lý lỗi. " +
+                    "Báo cáo gồm cơ sở lý thuyết, phân tích thiết kế, triển khai, đánh giá và hướng phát triển.";
+            case "submitCouncil" -> "Hồ sơ gửi Hội đồng gồm nội dung báo cáo cuối kỳ, tóm tắt kết quả và kế hoạch trình bày. " +
+                    "GVHD đã xem xét và đồng ý cho chuyển hồ sơ.";
+            case "reviseProposal" -> "Đã bổ sung phạm vi dữ liệu, tiêu chí đánh giá, phân công công việc và kế hoạch theo tuần.";
+            case "submitSignedProposal" -> "Đề cương đã được GVHD xác nhận, gửi Khoa xem xét và duyệt chính thức.";
+            default -> "Mục tiêu: xây dựng sản phẩm có thể chạy thử và đánh giá được. " +
+                    "Kế hoạch: khảo sát 2 tuần, thiết kế 2 tuần, triển khai 6 tuần, kiểm thử và viết báo cáo 2 tuần.";
+        };
+        return thesis.getTitle() + "\n\n" + thesis.getDescription() + "\n\n" + detail;
+    }
+
+    private User user(String username) {
+        return users.findByUsername(username).orElseThrow(() -> new IllegalStateException("Missing demo account: " + username));
     }
 }

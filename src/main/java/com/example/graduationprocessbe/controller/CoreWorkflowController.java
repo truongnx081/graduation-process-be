@@ -2,6 +2,7 @@ package com.example.graduationprocessbe.controller;
 
 import com.example.graduationprocessbe.dto.ApiResponseWrapper;
 import com.example.graduationprocessbe.service.CoreWorkflowService;
+import com.example.graduationprocessbe.service.RoundMailManagementService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.security.access.prepost.PreAuthorize;
@@ -18,6 +19,7 @@ import static com.example.graduationprocessbe.util.ApiResponses.ok;
 @RequiredArgsConstructor
 public class CoreWorkflowController {
     private final CoreWorkflowService core;
+    private final RoundMailManagementService roundMail;
 
     public record YearInput(String code,int startYear) {}
     public record SemesterInput(String academicYearId,int number) {}
@@ -27,10 +29,28 @@ public class CoreWorkflowController {
     public record DraftInput(String name,String sourceId) {}
     public record TemplateInput(String templateId) {}
     public record WindowInput(String stepKey,OffsetDateTime opensAt,OffsetDateTime closesAt) {}
+    public record MailSettingsInput(int remindBeforeHours,int remindAfterHours) {}
+    public record CampaignInput(String subject,String message,OffsetDateTime scheduledAt) {}
+
+    @GetMapping("/rounds/{id}/mail-settings") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<Map<String,Object>>> mailSettings(@PathVariable String id) { return ok(roundMail.settings(id)); }
+    @PutMapping("/rounds/{id}/mail-settings") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<Void>> saveMailSettings(@PathVariable String id,@RequestBody MailSettingsInput input) {
+        roundMail.saveSettings(id,input.remindBeforeHours(),input.remindAfterHours()); return ok(null);
+    }
+    @GetMapping("/rounds/{id}/mail-campaigns") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> mailCampaigns(@PathVariable String id) { return ok(roundMail.campaigns(id)); }
+    @PostMapping("/rounds/{id}/mail-campaigns") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<String>> scheduleMail(@PathVariable String id,@RequestBody CampaignInput input) {
+        return ok(roundMail.schedule(id,input.subject(),input.message(),input.scheduledAt()));
+    }
+    @GetMapping("/rounds/{id}/mail-deliveries") @PreAuthorize("hasRole('ADMIN')")
+    public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> mailDeliveries(@PathVariable String id) { return ok(roundMail.deliveries(id)); }
 
     @GetMapping("/years") public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> years() { return ok(core.years()); }
     @GetMapping("/semesters") public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> semesters() { return ok(core.semesters()); }
     @GetMapping("/rounds") public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> rounds() { return ok(core.rounds()); }
+    @GetMapping("/rounds/{id}/steps") public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> roundSteps(@PathVariable String id) { return ok(core.roundSteps(id)); }
     @GetMapping("/overdue") @PreAuthorize("hasAnyRole('ADMIN','FACULTY_STAFF')")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> overdue() { return ok(core.overdueTasks()); }
     @GetMapping("/rounds/{id}/lecturers") public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> lecturers(@PathVariable String id) { return ok(core.lecturers(id)); }

@@ -1,7 +1,6 @@
 package com.example.graduationprocessbe.dto.response;
 
 import com.fasterxml.jackson.annotation.JsonInclude;
-import lombok.AllArgsConstructor;
 import lombok.Getter;
 import lombok.NoArgsConstructor;
 import lombok.Setter;
@@ -11,7 +10,6 @@ import java.time.LocalDateTime;
 @Getter
 @Setter
 @NoArgsConstructor
-@AllArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class ThesisResponse {
     private String id;
@@ -22,6 +20,7 @@ public class ThesisResponse {
     private String phaseId;
     private String processInstanceId;
     private String currentStatus;
+    private String currentStatusLabel;
     private Boolean guidanceApproved;
     private LocalDateTime guidanceRespondedAt;
     private String guidanceComment;

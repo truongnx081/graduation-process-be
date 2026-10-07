@@ -12,6 +12,7 @@ import com.example.graduationprocessbe.dto.response.ThesisResponse;
 import com.example.graduationprocessbe.service.AuditLogService;
 import com.example.graduationprocessbe.service.ThesisProcessService;
 import com.example.graduationprocessbe.service.ThesisService;
+import com.example.graduationprocessbe.service.WorkflowPresentationService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -41,6 +42,7 @@ public class ThesisController {
     private final ThesisService thesisService;
     private final AuditLogService auditLogService;
     private final JdbcTemplate jdbc;
+    private final WorkflowPresentationService presentation;
     private final com.example.graduationprocessbe.service.CurrentUserService currentUserService;
 
     /** Đăng ký đề tài và nhóm trong mốc đăng ký. */
@@ -160,13 +162,22 @@ public class ThesisController {
     }
     @GetMapping("/{id}/submissions")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> submissions(@PathVariable String id) {
-        thesisProcessService.getThesis(id);
-        return ok(jdbc.queryForList("SELECT s.id,s.step_key,s.content,s.attachment_url,s.submitted_at,u.full_name AS submitted_by FROM thesis_submissions s JOIN users u ON u.id=s.submitted_by WHERE s.thesis_id=? ORDER BY s.submitted_at",id));
+        String processId = thesisProcessService.getThesis(id).getProcessInstanceId();
+        var rows = jdbc.queryForList("SELECT s.id,s.step_key,s.content,s.attachment_url,s.submitted_at,u.full_name AS submitted_by FROM thesis_submissions s JOIN users u ON u.id=s.submitted_by WHERE s.thesis_id=? ORDER BY s.submitted_at",id);
+        rows.forEach(row -> row.put("step_name", presentation.stepLabel(processId, (String)row.get("step_key"))));
+        return ok(rows);
     }
     @GetMapping("/{id}/feedback")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> feedback(@PathVariable String id) {
+        String processId = thesisProcessService.getThesis(id).getProcessInstanceId();
+        var rows = jdbc.queryForList("SELECT f.id,f.step_key,f.approved,f.comment,f.reviewed_at,u.full_name AS reviewer FROM thesis_feedback f JOIN users u ON u.id=f.reviewer_id WHERE f.thesis_id=? ORDER BY f.reviewed_at",id);
+        rows.forEach(row -> row.put("step_name", presentation.stepLabel(processId, (String)row.get("step_key"))));
+        return ok(rows);
+    }
+    @GetMapping("/{id}/defense-schedule")
+    public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> defenseSchedule(@PathVariable String id) {
         thesisProcessService.getThesis(id);
-        return ok(jdbc.queryForList("SELECT f.id,f.step_key,f.approved,f.comment,f.reviewed_at,u.full_name AS reviewer FROM thesis_feedback f JOIN users u ON u.id=f.reviewer_id WHERE f.thesis_id=? ORDER BY f.reviewed_at",id));
+        return ok(jdbc.queryForList("SELECT defense_at,room,council_name,notes,published_at FROM defense_schedules WHERE thesis_id=?",id));
     }
     private boolean actorHasFacultyRole(String id,String roundId) {
         Integer count=jdbc.queryForObject("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? AND r.role_code='FACULTY_STAFF' AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",Integer.class,id,roundId);

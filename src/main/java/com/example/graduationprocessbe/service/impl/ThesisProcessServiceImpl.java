@@ -12,6 +12,8 @@ import com.example.graduationprocessbe.repository.UserRepository;
 import com.example.graduationprocessbe.service.AuditLogService;
 import com.example.graduationprocessbe.service.CurrentUserService;
 import com.example.graduationprocessbe.service.ThesisProcessService;
+import com.example.graduationprocessbe.service.WorkflowPresentationService;
+import com.example.graduationprocessbe.service.WorkflowMailService;
 import lombok.RequiredArgsConstructor;
 import org.flowable.engine.RuntimeService;
 import org.flowable.engine.TaskService;
@@ -29,6 +31,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.time.OffsetDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
 
 @Service
 @RequiredArgsConstructor
@@ -44,6 +48,8 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     private final AuditLogService auditLogService;
     private final CurrentUserService currentUserService;
     private final JdbcTemplate jdbc;
+    private final WorkflowPresentationService presentation;
+    private final WorkflowMailService workflowMail;
 
     @Override
     @Transactional
@@ -51,6 +57,8 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         User actor=currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!"STUDENT".equals(actor.getUserType()) || !actor.getId().equals(request.getStudentId()))
             throw new AccessDeniedException("Chỉ sinh viên được đăng ký đề tài của mình");
+        if (request.getProposalContent()==null || request.getProposalContent().isBlank())
+            throw new IllegalArgumentException("Cần nội dung hoặc liên kết đề cương");
         User student = findUser(request.getStudentId());
         User lecturer = findUser(request.getLecturerId());
         if (!"LECTURER".equals(lecturer.getUserType())) throw new IllegalArgumentException("GVHD phải là giảng viên");
@@ -84,18 +92,43 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         thesis.setStudent(student);
         thesis.setLecturer(lecturer);
         thesis.setPhaseId(request.getPhaseId());
-        thesis.setCurrentStatus("PENDING_SUPERVISOR");
+        thesis.setDescription(request.getProposalContent().trim());
         thesis = thesisRepository.saveAndFlush(thesis);
         jdbc.update("INSERT INTO members(thesis_id,user_id,thesis_round_id) VALUES(?,?,?)",thesis.getId(),student.getId(),request.getPhaseId());
         if (partner!=null) jdbc.update("INSERT INTO members(thesis_id,user_id,thesis_round_id) VALUES(?,?,?)",thesis.getId(),partner.getId(),request.getPhaseId());
-        return thesisMapper.toResponse(thesis);
+        var definitions = jdbc.queryForList("SELECT workflow_definition_id FROM thesis_rounds WHERE id=?",request.getPhaseId());
+        if (definitions.isEmpty() || definitions.getFirst().get("workflow_definition_id")==null)
+            throw new IllegalArgumentException("Đợt chưa được gán quy trình đã công bố");
+        String definition=(String)definitions.getFirst().get("workflow_definition_id");
+        List<String> students=jdbc.queryForList("SELECT user_id FROM members WHERE thesis_id=? ORDER BY user_id",String.class,thesis.getId());
+        Map<String,Object> initial=new HashMap<>();
+        initial.put("thesisId",thesis.getId()); initial.put("studentId",student.getId());
+        initial.put("studentIds",String.join(",",students)); initial.put("studentEmail",student.getEmail());
+        initial.put("lecturerId",lecturer.getId());
+        ProcessInstance instance=runtimeService.startProcessInstanceById(definition,thesis.getId(),initial);
+        thesis.setProcessInstanceId(instance.getId());
+        Task first=taskService.createTaskQuery().processInstanceId(instance.getId()).singleResult();
+        if (first==null || !"submitProposal".equals(first.getTaskDefinitionKey()))
+            throw new IllegalArgumentException("Quy trình phải bắt đầu bằng bước nộp đề cương");
+        jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content) VALUES(?,?,?,?,?)",
+                UUID.randomUUID().toString(),thesis.getId(),"submitProposal",student.getId(),request.getProposalContent().trim());
+        taskService.complete(first.getId(),Map.of("content",request.getProposalContent().trim()));
+        refreshStatus(thesis);
+        thesis=thesisRepository.saveAndFlush(thesis);
+        enqueueNextTask(thesis);
+        auditLogService.record(instance.getId(),actor,"SUBMIT_PROPOSAL","submitProposal",Map.of("thesisId",thesis.getId()));
+        return response(thesis);
     }
 
     @Override
+    @Transactional
     public ThesisResponse submitProposal(String thesisId, String content) {
-        // Initial proposal approval and signatures are handled outside the system.
-        getThesis(thesisId);
-        throw new IllegalArgumentException("Đề cương được trao đổi ngoài hệ thống. Đăng ký cần giảng viên xác nhận hướng dẫn.");
+        Thesis thesis=findThesis(thesisId);
+        authorizeThesis(thesis);
+        if (thesis.getProcessInstanceId()==null) throw new IllegalArgumentException("Hồ sơ chưa có quy trình");
+        Task task=taskService.createTaskQuery().processInstanceId(thesis.getProcessInstanceId()).taskDefinitionKey("submitProposal").singleResult();
+        if (task==null) throw new IllegalArgumentException("Hồ sơ hiện không chờ nộp đề cương");
+        return completeTask(task.getId(),Map.of("content",content));
     }
 
     @Override
@@ -106,19 +139,18 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         User actor = currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!"LECTURER".equals(actor.getUserType()) || !thesis.getLecturer().getId().equals(actor.getId()))
             throw new AccessDeniedException("Chỉ giảng viên được chọn mới được xác nhận hướng dẫn");
-        if (!pendingGuidance(thesis)) throw new IllegalArgumentException("Đăng ký đã được xử lý");
+        Task task=thesis.getProcessInstanceId()==null ? null : taskService.createTaskQuery()
+                .processInstanceId(thesis.getProcessInstanceId()).taskDefinitionKey("confirmGuidance").singleResult();
+        if (task==null) throw new IllegalArgumentException("Hồ sơ hiện chưa đến bước xác nhận hướng dẫn");
+        if (task.getAssignee()==null) taskService.claim(task.getId(),actor.getId());
         String note = comment == null ? "" : comment.trim();
         if (note.length() > 2000) throw new IllegalArgumentException("Nhận xét tối đa 2000 ký tự");
         if (!approved && note.isBlank()) throw new IllegalArgumentException("Cần ghi lý do từ chối hướng dẫn");
         thesis.setGuidanceApproved(approved);
         thesis.setGuidanceRespondedAt(java.time.LocalDateTime.now());
         thesis.setGuidanceComment(note);
-        if (approved) startConfirmedWorkflow(thesis, actor);
-        else thesis.setCurrentStatus("GUIDANCE_REJECTED");
-        jdbc.update("INSERT INTO thesis_feedback(id,thesis_id,step_key,reviewer_id,approved,comment) VALUES(?,?,?,?,?,?)",
-                UUID.randomUUID().toString(), thesisId, "confirmGuidance", actor.getId(), approved,
-                note.isBlank() ? "Đồng ý nhận hướng dẫn" : note);
-        return thesisMapper.toResponse(thesisRepository.saveAndFlush(thesis));
+        thesisRepository.saveAndFlush(thesis);
+        return completeTask(task.getId(),Map.of("approved",approved,"comment",note));
     }
 
     @Override
@@ -129,54 +161,27 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         User actor = currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!"STUDENT".equals(actor.getUserType()) || !actor.getId().equals(thesis.getStudent().getId()))
             throw new AccessDeniedException("Chỉ sinh viên đăng ký được gửi lại đăng ký của nhóm");
-        if (!"GUIDANCE_REJECTED".equals(thesis.getCurrentStatus()) || thesis.getProcessInstanceId() != null)
-            throw new IllegalArgumentException("Chỉ đăng ký bị từ chối mới được gửi lại");
+        Task task=thesis.getProcessInstanceId()==null ? null : taskService.createTaskQuery()
+                .processInstanceId(thesis.getProcessInstanceId()).taskDefinitionKey("registerThesis").singleResult();
+        if (task==null) throw new IllegalArgumentException("Hồ sơ hiện không chờ gửi lại đăng ký");
+        if (task.getAssignee()==null) taskService.claim(task.getId(),actor.getId());
         if (title == null || title.isBlank() || title.trim().length() > 255)
             throw new IllegalArgumentException("Tên đề tài không hợp lệ");
-        var rounds = jdbc.queryForList("SELECT registration_opens_at,registration_closes_at FROM thesis_rounds WHERE id=? AND active=true", thesis.getPhaseId());
-        OffsetDateTime now = OffsetDateTime.now();
-        if (rounds.isEmpty() || rounds.getFirst().get("registration_opens_at") == null || rounds.getFirst().get("registration_closes_at") == null
-                || now.isBefore(asOffset(rounds.getFirst().get("registration_opens_at"))) || now.isAfter(asOffset(rounds.getFirst().get("registration_closes_at"))))
-            throw new IllegalArgumentException("Ngoài thời gian đăng ký đề tài");
+        checkStepWindow(thesis.getPhaseId(),"registerThesis");
         User lecturer = findUser(lecturerId);
         Integer available = jdbc.queryForObject("SELECT count(*) FROM round_lecturers WHERE round_id=? AND lecturer_id=? AND active=true", Integer.class, thesis.getPhaseId(), lecturerId);
         if (!"LECTURER".equals(lecturer.getUserType()) || !"ACTIVE".equals(lecturer.getStatus()) || available == null || available == 0)
             throw new IllegalArgumentException("Giảng viên chưa tham gia đợt này hoặc đã ngừng hoạt động");
         thesis.setTitle(title.trim());
         thesis.setLecturer(lecturer);
-        thesis.setCurrentStatus("PENDING_SUPERVISOR");
         thesis.setGuidanceApproved(null);
         thesis.setGuidanceRespondedAt(null);
         thesis.setGuidanceComment(null);
-        return thesisMapper.toResponse(thesisRepository.saveAndFlush(thesis));
-    }
-
-    private boolean pendingGuidance(Thesis thesis) {
-        return thesis.getProcessInstanceId() == null
-                && ("PENDING_SUPERVISOR".equals(thesis.getCurrentStatus()) || "REGISTERED".equals(thesis.getCurrentStatus()));
-    }
-
-    private void startConfirmedWorkflow(Thesis thesis, User actor) {
-        var definitions = jdbc.queryForList("SELECT workflow_definition_id FROM thesis_rounds WHERE id=?", thesis.getPhaseId());
-        if (definitions.isEmpty() || definitions.getFirst().get("workflow_definition_id") == null)
-            throw new IllegalArgumentException("Đợt chưa được gán quy trình đã công bố");
-        String definition = (String) definitions.getFirst().get("workflow_definition_id");
-        // Published templates keep their version. Skip initial proposal submission/review,
-        // which have already happened outside the system, without completing a fake approval.
-        List<String> nextSteps = jdbc.queryForList("SELECT ws.step_key FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id WHERE wt.process_definition_id=? ORDER BY ws.sort_order OFFSET 2 LIMIT 1", String.class, definition);
-        if (nextSteps.isEmpty()) throw new IllegalArgumentException("Quy trình cần có bước thực hiện sau xác nhận hướng dẫn");
-        List<String> students = jdbc.queryForList("SELECT user_id FROM members WHERE thesis_id=? ORDER BY user_id", String.class, thesis.getId());
-        Map<String,Object> variables = new HashMap<>();
-        variables.put("thesisId", thesis.getId()); variables.put("studentId", thesis.getStudent().getId());
-        variables.put("studentIds", String.join(",", students)); variables.put("studentEmail", thesis.getStudent().getEmail());
-        variables.put("lecturerId", thesis.getLecturer().getId()); variables.put("guidanceConfirmed", true);
-        ProcessInstance instance = runtimeService.startProcessInstanceById(definition, thesis.getId(), variables);
-        thesis.setProcessInstanceId(instance.getId());
-        var initialTasks = taskService.createTaskQuery().processInstanceId(instance.getId()).list();
-        runtimeService.createChangeActivityStateBuilder().processInstanceId(instance.getId())
-                .moveActivityIdsToSingleActivityId(initialTasks.stream().map(Task::getTaskDefinitionKey).distinct().toList(), nextSteps.getFirst()).changeState();
+        runtimeService.setVariable(thesis.getProcessInstanceId(),"lecturerId",lecturer.getId());
+        taskService.complete(task.getId());
         refreshStatus(thesis);
-        auditLogService.record(instance.getId(), actor, "CONFIRM_GUIDANCE", "confirmGuidance", Map.of("thesisId", thesis.getId()));
+        enqueueNextTask(thesis);
+        return response(thesisRepository.saveAndFlush(thesis));
     }
 
     @Override
@@ -184,7 +189,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     public ThesisResponse getThesis(String thesisId) {
         Thesis thesis=findThesis(thesisId);
         authorizeThesis(thesis);
-        return thesisMapper.toResponse(thesis);
+        return response(thesis);
     }
 
     @Override
@@ -209,7 +214,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         User actor=currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!"ADMIN".equals(actor.getUserType())) {
             if (assignee!=null && !assignee.equals(actor.getId())) throw new AccessDeniedException("Không được xem tác vụ của người khác");
-            if (candidateGroup!=null && !hasRole(actor.getId(),candidateGroup)) throw new AccessDeniedException("Không thuộc nhóm xử lý");
+            if (candidateGroup!=null && !roles(actor.getId()).contains(candidateGroup)) throw new AccessDeniedException("Không thuộc nhóm xử lý");
             if (assignee==null && candidateGroup==null) return java.util.stream.Stream.concat(
                 taskService.createTaskQuery().taskAssignee(actor.getId()).active().list().stream(),
                 java.util.stream.Stream.concat(
@@ -217,6 +222,12 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
                     taskService.createTaskQuery().taskCandidateUser(actor.getId()).active().list().stream()))
                 .distinct().filter(task -> canAccessTask(task,actor)).map(this::toTaskResponse).toList();
         }
+        if (candidateGroup != null && assignee == null && !"ADMIN".equals(actor.getUserType())) return java.util.stream.Stream.concat(
+                taskService.createTaskQuery().taskCandidateGroup(candidateGroup).active().list().stream(),
+                taskService.createTaskQuery().taskAssignee(actor.getId()).active().list().stream())
+                .distinct().filter(task -> task.getAssignee() == null || taskService.getIdentityLinksForTask(task.getId()).stream()
+                        .anyMatch(link -> candidateGroup.equals(link.getGroupId())))
+                .filter(task -> canAccessTask(task, actor)).map(this::toTaskResponse).toList();
         TaskQuery query = taskService.createTaskQuery().active();
         if (assignee != null) {
             query.taskAssignee(assignee);
@@ -254,6 +265,8 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         Task task = findTask(taskId);
         User actor=currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         authorizeTask(task,actor);
+        if (!actor.getId().equals(task.getAssignee()))
+            throw new AccessDeniedException("Cần nhận tác vụ trước khi hoàn thành");
         Thesis thesis = thesisRepository.findByProcessInstanceId(task.getProcessInstanceId())
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Thesis not found for process instance: " + task.getProcessInstanceId()));
@@ -264,14 +277,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
             if (kind.equals("SUBMIT")) {
                 // submitProposal tasks are revision requests after faculty feedback;
                 // the initial proposal window only governs first registration.
-                List<Map<String,Object>> windows="submitProposal".equals(task.getTaskDefinitionKey()) ? List.of()
-                    : jdbc.queryForList("SELECT opens_at,closes_at FROM round_step_windows WHERE round_id=? AND step_key=?",thesis.getPhaseId(),task.getTaskDefinitionKey());
-                if (!windows.isEmpty()) {
-                    OffsetDateTime current=OffsetDateTime.now();
-                    Map<String,Object> window=windows.getFirst();
-                    if (current.isBefore(asOffset(window.get("opens_at"))) || current.isAfter(asOffset(window.get("closes_at"))))
-                        throw new IllegalArgumentException("Biểu mẫu bước này chưa mở hoặc đã hết hạn");
-                }
+                if (!"submitProposal".equals(task.getTaskDefinitionKey())) checkStepWindow(thesis.getPhaseId(),task.getTaskDefinitionKey());
                 Object content=vars.get("content");
                 if (!(content instanceof String text) || text.isBlank()) throw new IllegalArgumentException("Cần nội dung hoặc liên kết hồ sơ nộp");
                 jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content,attachment_url) VALUES(?,?,?,?,?,?)",
@@ -285,14 +291,96 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
             }
         }
 
+        if ("confirmGuidance".equals(task.getTaskDefinitionKey())) {
+            Boolean approved=(Boolean)vars.get("approved");
+            thesis.setGuidanceApproved(approved);
+            thesis.setGuidanceRespondedAt(java.time.LocalDateTime.now());
+            thesis.setGuidanceComment(String.valueOf(vars.getOrDefault("comment","")));
+        }
+
+        if ("scheduleDefense".equals(task.getTaskDefinitionKey())) {
+            Object when=vars.get("defenseAt"), room=vars.get("room"), council=vars.get("councilName");
+            if (!(when instanceof String date) || !(room instanceof String place) || place.isBlank()
+                    || !(council instanceof String name) || name.isBlank())
+                throw new IllegalArgumentException("Cần ngày giờ, phòng và tên Hội đồng bảo vệ");
+            OffsetDateTime scheduled;
+            try { scheduled=OffsetDateTime.parse(date); }
+            catch (java.time.format.DateTimeParseException ex) { throw new IllegalArgumentException("Ngày giờ bảo vệ không hợp lệ"); }
+            if (!scheduled.isAfter(OffsetDateTime.now())) throw new IllegalArgumentException("Lịch bảo vệ phải ở tương lai");
+            jdbc.update("INSERT INTO defense_schedules(id,thesis_id,defense_at,room,council_name,notes,published_by) VALUES(?,?,?,?,?,?,?) ON CONFLICT(thesis_id) DO UPDATE SET defense_at=EXCLUDED.defense_at,room=EXCLUDED.room,council_name=EXCLUDED.council_name,notes=EXCLUDED.notes,published_by=EXCLUDED.published_by,published_at=now()",
+                    UUID.randomUUID().toString(),thesis.getId(),scheduled,place.trim(),name.trim(),vars.get("notes"),actor.getId());
+        }
+        if ("registerThesis".equals(task.getTaskDefinitionKey())) {
+            if (!"STUDENT".equals(actor.getUserType()))
+                throw new AccessDeniedException("Chỉ sinh viên được xác nhận đăng ký ĐATN");
+            checkStepWindow(thesis.getPhaseId(),"registerThesis");
+        }
         taskService.complete(taskId, vars);
 
         refreshStatus(thesis);
         thesis = thesisRepository.save(thesis);
+        if (!step.isEmpty() && "REVIEW".equals(step.getFirst().get("kind")))
+            enqueueCaseFeedback(thesis, task, Boolean.TRUE.equals(vars.get("approved")), String.valueOf(vars.getOrDefault("comment", "")));
+        if ("scheduleDefense".equals(task.getTaskDefinitionKey())) enqueueDefenseSchedule(thesis, task, vars);
+        enqueueNextTask(thesis);
 
         auditLogService.record(task.getProcessInstanceId(), currentUserService.getCurrentUser().orElse(null),
                 "COMPLETE_TASK", task.getTaskDefinitionKey(), vars);
-        return thesisMapper.toResponse(thesis);
+        return response(thesis);
+    }
+
+    private void enqueueNextTask(Thesis thesis) {
+        List<Task> active=taskService.createTaskQuery().processInstanceId(thesis.getProcessInstanceId()).active().list();
+        if (active.isEmpty()) return;
+        Task next=active.getFirst();
+        var round=jdbc.queryForMap("SELECT name FROM thesis_rounds WHERE id=?",thesis.getPhaseId());
+        String roundName=(String)round.get("name");
+        String deadline=next.getDueDate()==null ? "Theo lịch của đợt" : next.getDueDate().toInstant()
+                .atZone(ZoneId.of("Asia/Ho_Chi_Minh")).format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"));
+        List<String> recipients;
+        if (next.getAssignee()!=null) {
+            recipients=jdbc.queryForList("SELECT email FROM users WHERE id=? AND status='ACTIVE'",String.class,next.getAssignee());
+        } else {
+            var roles=jdbc.queryForList("SELECT assignee_role FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id " +
+                    "WHERE wt.process_definition_id=? AND ws.step_key=?",String.class,next.getProcessDefinitionId(),next.getTaskDefinitionKey());
+            if (roles.isEmpty()) return;
+            String role=roles.getFirst();
+            if ("STUDENT".equals(role))
+                recipients=jdbc.queryForList("SELECT DISTINCT u.email FROM members m JOIN users u ON u.id=m.user_id " +
+                        "WHERE m.thesis_id=? AND u.status='ACTIVE'",String.class,thesis.getId());
+            else recipients=jdbc.queryForList("SELECT DISTINCT u.email FROM user_roles ur JOIN roles r ON r.id=ur.role_id " +
+                    "JOIN users u ON u.id=ur.user_id WHERE r.role_code=? AND u.status='ACTIVE' " +
+                    "AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",String.class,role,thesis.getPhaseId());
+        }
+        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),next.getTaskDefinitionKey(),
+                "NEXT_"+next.getId(),recipient,"[ĐATN] Việc cần xử lý: "+next.getName(),
+                "Hồ sơ “"+thesis.getTitle()+"” đã đến bước cần xử lý.",roundName,next.getName(),deadline);
+    }
+
+    private void enqueueCaseFeedback(Thesis thesis, Task task, boolean approved, String comment) {
+        String roundName=jdbc.queryForObject("SELECT name FROM thesis_rounds WHERE id=?",String.class,thesis.getPhaseId());
+        List<String> recipients=jdbc.queryForList("SELECT DISTINCT email FROM users WHERE id IN " +
+                "(SELECT user_id FROM members WHERE thesis_id=? UNION SELECT lecturer_id FROM theses WHERE id=?) " +
+                "AND status='ACTIVE'",String.class,thesis.getId(),thesis.getId());
+        String message="Hồ sơ “"+thesis.getTitle()+"”: "+(approved ? "đã được duyệt." : "cần chỉnh sửa.") +
+                (comment.isBlank() ? "" : "\nNhận xét: "+comment);
+        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),task.getTaskDefinitionKey(),
+                "DONE_"+task.getId(),recipient,"[ĐATN] Kết quả: "+task.getName(),message,
+                roundName,task.getName(),"—");
+    }
+
+    private void enqueueDefenseSchedule(Thesis thesis, Task task, Map<String,Object> vars) {
+        String roundName=jdbc.queryForObject("SELECT name FROM thesis_rounds WHERE id=?",String.class,thesis.getPhaseId());
+        List<String> recipients=jdbc.queryForList("SELECT DISTINCT email FROM users WHERE id IN " +
+                "(SELECT user_id FROM members WHERE thesis_id=? UNION SELECT lecturer_id FROM theses WHERE id=?) " +
+                "AND status='ACTIVE'",String.class,thesis.getId(),thesis.getId());
+        String deadline=OffsetDateTime.parse((String)vars.get("defenseAt"))
+                .atZoneSameInstant(ZoneId.of("Asia/Ho_Chi_Minh")).format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"));
+        String message="Lịch bảo vệ hồ sơ “"+thesis.getTitle()+"” đã được công bố. Phòng: "+vars.get("room")+
+                ". Hội đồng: "+vars.get("councilName")+".";
+        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),task.getTaskDefinitionKey(),
+                "SCHEDULE_"+task.getId(),recipient,"[ĐATN] Lịch bảo vệ đồ án",message,
+                roundName,task.getName(),deadline);
     }
 
     /** currentStatus = taskDefinitionKey của task đang chờ, hoặc COMPLETED khi process kết thúc. */
@@ -302,6 +390,15 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
                 .active()
                 .list();
         thesis.setCurrentStatus(tasks.isEmpty() ? STATUS_COMPLETED : tasks.get(0).getTaskDefinitionKey());
+    }
+
+    private void checkStepWindow(String roundId, String stepKey) {
+        List<Map<String,Object>> windows=jdbc.queryForList("SELECT opens_at,closes_at FROM round_step_windows WHERE round_id=? AND step_key=?",roundId,stepKey);
+        if (windows.isEmpty()) return;
+        OffsetDateTime now=OffsetDateTime.now();
+        Map<String,Object> window=windows.getFirst();
+        if (now.isBefore(asOffset(window.get("opens_at"))) || now.isAfter(asOffset(window.get("closes_at"))))
+            throw new IllegalArgumentException("Biểu mẫu bước này chưa mở hoặc đã hết hạn");
     }
 
     private Task findTask(String taskId) {
@@ -314,7 +411,6 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     private List<String> roles(String userId) {
         return jdbc.queryForList("SELECT DISTINCT r.role_code FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=?",String.class,userId);
     }
-    private boolean hasRole(String userId,String role) { return roles(userId).contains(role); }
     private boolean hasRoleForRound(String userId,String role,String roundId) {
         Integer count=jdbc.queryForObject("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? AND r.role_code=? AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",Integer.class,userId,role,roundId);
         return count!=null && count>0;
@@ -365,6 +461,21 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         List<String> kinds=jdbc.queryForList("SELECT ws.kind FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id WHERE wt.process_definition_id=? AND ws.step_key=?",String.class,task.getProcessDefinitionId(),task.getTaskDefinitionKey());
         if (!kinds.isEmpty()) response.setKind(kinds.getFirst());
         if (task.getDueDate()!=null) response.setDueDate(task.getDueDate().toInstant().atZone(ZoneId.systemDefault()).toLocalDateTime());
+        var cases = jdbc.queryForList("SELECT t.id,t.title,s.full_name AS student_name FROM theses t JOIN users s ON s.id=t.student_id WHERE t.process_instance_id=?", task.getProcessInstanceId());
+        if (!cases.isEmpty()) {
+            var item = cases.getFirst();
+            response.setThesisId((String)item.get("id"));
+            response.setThesisTitle((String)item.get("title"));
+            response.setStudentName((String)item.get("student_name"));
+        }
+        if (task.getAssignee()!=null) {
+            var names = jdbc.queryForList("SELECT full_name FROM users WHERE id=?", String.class, task.getAssignee());
+            if (!names.isEmpty()) response.setAssigneeName(names.getFirst());
+        }
         return response;
+    }
+
+    private ThesisResponse response(Thesis thesis) {
+        return presentation.describe(thesis, thesisMapper.toResponse(thesis));
     }
 }

@@ -2,6 +2,7 @@ package com.example.graduationprocessbe.config;
 
 import com.example.graduationprocessbe.entity.*;
 import com.example.graduationprocessbe.repository.*;
+import com.example.graduationprocessbe.service.CoreWorkflowService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
@@ -31,6 +32,7 @@ public class DataInitializer implements ApplicationRunner {
     private final JdbcTemplate jdbcTemplate;
     private final PasswordEncoder passwordEncoder;
     private final DemoDataSeeder demoDataSeeder;
+    private final CoreWorkflowService workflowService;
 
     @Override
     @Transactional
@@ -39,17 +41,20 @@ public class DataInitializer implements ApplicationRunner {
         // PostgreSQL executes the complete script in this transaction.
         String seed = new ClassPathResource("seed_rbac_and_menus.sql")
                 .getContentAsString(StandardCharsets.UTF_8);
+        // Pass only a hash to SQL; its local-development fallback applies when unset.
+        if (bootstrapPassword != null && !bootstrapPassword.isEmpty() && bootstrapPassword.length() < 6) {
+            throw new IllegalStateException("APP_BOOTSTRAP_PASSWORD phải có ít nhất 6 ký tự");
+        }
+        jdbcTemplate.queryForObject("SELECT set_config('app.bootstrap.password_hash', ?, true)", String.class,
+                bootstrapPassword == null || bootstrapPassword.isEmpty()
+                        ? "" : passwordEncoder.encode(bootstrapPassword));
         jdbcTemplate.execute(seed);
+        String baselineDefinition = jdbcTemplate.queryForObject(
+                "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
+        if (baselineDefinition == null) workflowService.publish("core-template-v2");
 
         ensureUser("admin", "admin@graduation.local", "Quản trị viên Nguyễn Văn An", role("ADMIN"), "ADMIN");
         if (seedDemo) {
-            ensureUser("khoa", "khoa@graduation.local", "Giảng viên phụ trách Khoa CNTT", role("FACULTY_STAFF"), "LECTURER");
-            ensureUser("lecturer", "lecturer@graduation.local", "TS. Nguyễn Văn Tuấn", role("LECTURER"), "LECTURER");
-            ensureUser("lecturer2", "lecturer2@graduation.local", "ThS. Lê Thị Mai", role("LECTURER"), "LECTURER");
-            ensureUser("student", "student@graduation.local", "Trần Minh Quân", role("STUDENT"), "STUDENT");
-            ensureUser("student2", "student2@graduation.local", "Nguyễn Thị Lan", role("STUDENT"), "STUDENT");
-            ensureUser("student3", "student3@graduation.local", "Phạm Quốc Huy", role("STUDENT"), "STUDENT");
-            ensureUser("student4", "student4@graduation.local", "Vũ Thảo Vy", role("STUDENT"), "STUDENT");
             demoDataSeeder.seed();
         }
         if (userRoleRepository.countActiveGlobalAdmins()==0)

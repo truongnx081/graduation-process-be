@@ -78,7 +78,7 @@ public class CoreWorkflowService {
     public void setWindow(String roundId,String stepKey,OffsetDateTime opens,OffsetDateTime closes) {
         if (stepKey==null || opens==null || closes==null || !opens.isBefore(closes))
             throw new IllegalArgumentException("Mốc mở/đóng bước không hợp lệ");
-        Integer valid=jdbc.queryForObject("SELECT count(*) FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id JOIN workflow_steps ws ON ws.template_id=wt.id WHERE r.id=? AND ws.step_key=? AND ws.kind='SUBMIT'",Integer.class,roundId,stepKey);
+        Integer valid=jdbc.queryForObject("SELECT count(*) FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id JOIN workflow_steps ws ON ws.template_id=wt.id WHERE r.id=? AND ws.step_key=? AND (ws.kind='SUBMIT' OR ws.step_key='registerThesis')",Integer.class,roundId,stepKey);
         if (valid==null || valid==0) throw new IllegalArgumentException("Bước nộp không thuộc quy trình của đợt");
         jdbc.update("INSERT INTO round_step_windows(id,round_id,step_key,opens_at,closes_at) VALUES(?,?,?,?,?) ON CONFLICT(round_id,step_key) DO UPDATE SET opens_at=EXCLUDED.opens_at,closes_at=EXCLUDED.closes_at",
                 UUID.randomUUID().toString(),roundId,stepKey,opens,closes);
@@ -156,34 +156,55 @@ public class CoreWorkflowService {
     public List<Map<String,Object>> steps(String templateId) {
         return jdbc.queryForList("SELECT * FROM workflow_steps WHERE template_id=? ORDER BY sort_order",templateId);
     }
+    public List<Map<String,Object>> roundSteps(String roundId) {
+        return jdbc.queryForList("SELECT ws.step_key,ws.label,ws.sort_order,ws.kind,ws.assignee_role,ws.due_days,ws.next_key,ws.reject_key " +
+                "FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id " +
+                "JOIN workflow_steps ws ON ws.template_id=wt.id WHERE r.id=? ORDER BY ws.sort_order",roundId);
+    }
     @Transactional
     public String createDraft(String name, String sourceId) {
         if (name==null || name.isBlank()) throw new IllegalArgumentException("Cần tên phiên bản quy trình");
         String id=UUID.randomUUID().toString();
+        if (sourceId!=null && !Boolean.TRUE.equals(jdbc.queryForObject(
+                "SELECT EXISTS(SELECT 1 FROM workflow_templates WHERE id=?)",Boolean.class,sourceId)))
+            throw new IllegalArgumentException("Không tìm thấy quy trình để sao chép");
         int version=jdbc.queryForObject("SELECT coalesce(max(version),0)+1 FROM workflow_templates",Integer.class);
         jdbc.update("INSERT INTO workflow_templates(id,name,version,status) VALUES(?,?,?,'DRAFT')",id,name,version);
-        if (sourceId!=null) jdbc.update("INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days) SELECT gen_random_uuid()::text,?,step_key,label,sort_order,kind,assignee_role,due_days FROM workflow_steps WHERE template_id=?",id,sourceId);
+        if (sourceId!=null) jdbc.update("INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days,next_key,reject_key) SELECT gen_random_uuid()::text,?,step_key,label,sort_order,kind,assignee_role,due_days,next_key,reject_key FROM workflow_steps WHERE template_id=?",id,sourceId);
         return id;
     }
     @Transactional
     public void replaceSteps(String templateId, List<StepInput> steps) {
         String status=jdbc.queryForObject("SELECT status FROM workflow_templates WHERE id=?",String.class,templateId);
         if (!"DRAFT".equals(status)) throw new IllegalArgumentException("Chỉ được sửa bản nháp; hãy sao chép phiên bản đã công bố");
-        if (steps.size()<2 || steps.size()>30 || !"submitProposal".equals(steps.getFirst().key())
-                || !"SUBMIT".equals(steps.getFirst().kind()) || !"STUDENT".equals(steps.getFirst().role())
-                || !"REVIEW".equals(steps.get(1).kind()) || !"FACULTY_STAFF".equals(steps.get(1).role()))
-            throw new IllegalArgumentException("Quy trình phải bắt đầu bằng nộp đề cương và Khoa duyệt");
+        if (steps == null || steps.size()<2 || steps.size()>30 || !"submitProposal".equals(steps.getFirst().key())
+                || !"SUBMIT".equals(steps.getFirst().kind()) || !"STUDENT".equals(steps.getFirst().role()))
+            throw new IllegalArgumentException("Quy trình phải bắt đầu bằng bước sinh viên nộp đề cương");
+        if (steps.stream().anyMatch(s -> s.key()==null || s.label()==null || s.kind()==null || s.role()==null))
+            throw new IllegalArgumentException("Bước quy trình thiếu thông tin bắt buộc");
+        var keys = steps.stream().map(StepInput::key).toList();
+        if (keys.stream().distinct().count() != keys.size()) throw new IllegalArgumentException("Mã bước bị trùng");
+        if (steps.stream().anyMatch(s -> "start".equals(s.key()) || "end".equals(s.key()) || s.key().startsWith("gate_") || s.key().startsWith("f_")))
+            throw new IllegalArgumentException("Mã bước trùng mã hệ thống Flowable");
+        if (steps.stream().anyMatch(s -> "scheduleDefense".equals(s.key()) && !"FACULTY_STAFF".equals(s.role())))
+            throw new IllegalArgumentException("Bước lập lịch bảo vệ phải do Khoa xử lý");
+        if (steps.stream().anyMatch(s -> "confirmGuidance".equals(s.key()) && !"LECTURER".equals(s.role())))
+            throw new IllegalArgumentException("Bước xác nhận hướng dẫn phải do giảng viên xử lý");
         jdbc.update("DELETE FROM workflow_steps WHERE template_id=?",templateId);
         for (int i=0;i<steps.size();i++) {
             StepInput s=steps.get(i);
-            if (!s.key().matches("[A-Za-z][A-Za-z0-9_]{1,59}") || s.label()==null || s.label().isBlank()
+            if (!s.key().matches("[A-Za-z][A-Za-z0-9_]{1,59}") || s.label().isBlank()
                     || !List.of("SUBMIT","REVIEW","TASK").contains(s.kind())
                     || !List.of("STUDENT","LECTURER","FACULTY_STAFF","COMMITTEE").contains(s.role())
                     || s.dueDays()!=null && s.dueDays()<0) throw new IllegalArgumentException("Bước quy trình không hợp lệ");
-            if ("REVIEW".equals(s.kind()) && steps.subList(0,i).stream().noneMatch(p -> "SUBMIT".equals(p.kind())))
-                throw new IllegalArgumentException("Bước duyệt cần có bước nộp để trả về khi yêu cầu sửa");
-            jdbc.update("INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days) VALUES(?,?,?,?,?,?,?,?)",
-                    UUID.randomUUID().toString(),templateId,s.key(),s.label(),i+1,s.kind(),s.role(),s.dueDays());
+            if (s.nextKey()!=null && !s.nextKey().isBlank() && !"end".equals(s.nextKey()) && !keys.contains(s.nextKey()))
+                throw new IllegalArgumentException("Bước tiếp theo không tồn tại: "+s.nextKey());
+            if ("REVIEW".equals(s.kind()) && (s.rejectKey()==null || !keys.contains(s.rejectKey())))
+                throw new IllegalArgumentException("Bước duyệt cần chọn bước quay lại khi yêu cầu sửa");
+            if (!"REVIEW".equals(s.kind()) && s.rejectKey()!=null && !s.rejectKey().isBlank())
+                throw new IllegalArgumentException("Chỉ bước duyệt mới có nhánh yêu cầu sửa");
+            jdbc.update("INSERT INTO workflow_steps(id,template_id,step_key,label,sort_order,kind,assignee_role,due_days,next_key,reject_key) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                    UUID.randomUUID().toString(),templateId,s.key(),s.label(),i+1,s.kind(),s.role(),s.dueDays(),s.nextKey(),s.rejectKey());
         }
     }
     @Transactional
@@ -192,6 +213,7 @@ public class CoreWorkflowService {
         if (!"DRAFT".equals(status)) throw new IllegalArgumentException("Phiên bản đã công bố");
         List<Map<String,Object>> steps=steps(templateId);
         if (steps.size()<2) throw new IllegalArgumentException("Quy trình chưa có đủ bước");
+        validateGraph(steps);
         String key="graduation_"+templateId.replace("-","");
         String xml=buildBpmn(key,steps);
         var deployment=repositoryService.createDeployment().name("DATN "+templateId).addString(key+".bpmn20.xml",xml).deploy();
@@ -202,6 +224,8 @@ public class CoreWorkflowService {
     @Transactional
     public void assignTemplate(String roundId,String templateId) {
         String definition=jdbc.queryForObject("SELECT process_definition_id FROM workflow_templates WHERE id=? AND status='PUBLISHED'",String.class,templateId);
+        if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM theses WHERE phase_id=?)",Boolean.class,roundId)))
+            throw new IllegalArgumentException("Đợt đã có hồ sơ; không thể đổi quy trình đang áp dụng");
         if (jdbc.update("UPDATE thesis_rounds SET workflow_definition_id=? WHERE id=?",definition,roundId)==0)
             throw new IllegalArgumentException("Không tìm thấy đợt ĐATN");
     }
@@ -210,33 +234,61 @@ public class CoreWorkflowService {
         for (Map<String,Object> step:steps) {
             String id=(String)step.get("step_key"), role=(String)step.get("assignee_role");
             xml.append("<userTask id=\"").append(id).append("\" name=\"").append(escape((String)step.get("label"))).append("\"");
-            if (role.equals("STUDENT")) xml.append(" flowable:candidateUsers=\"${studentIds}\"");
+            if (role.equals("STUDENT")) xml.append(" flowable:candidateUsers=\"${studentId}\"");
             else if (role.equals("LECTURER")) xml.append(" flowable:assignee=\"${lecturerId}\"");
             else xml.append(" flowable:candidateGroups=\"").append(role).append("\"");
             xml.append("><extensionElements><flowable:taskListener event=\"create\" delegateExpression=\"${coreTaskDeadlineListener}\"/></extensionElements></userTask>");
             if (step.get("kind").equals("REVIEW")) xml.append("<exclusiveGateway id=\"gate_").append(id).append("\"/>");
         }
-        String first=(String)steps.getFirst().get("step_key"), second=(String)steps.get(1).get("step_key");
-        xml.append(flow("start",second,null)); // proposal is submitted when the case is created
-        xml.append(flow(first,second,null)); // revision loop
-        for (int i=1;i<steps.size();i++) {
+        String first=(String)steps.getFirst().get("step_key");
+        xml.append(flow("start",first,null));
+        for (int i=0;i<steps.size();i++) {
             Map<String,Object> step=steps.get(i);
-            String id=(String)step.get("step_key"), next=i+1<steps.size()?(String)steps.get(i+1).get("step_key"):"end";
+            String id=(String)step.get("step_key");
+            String next=step.get("next_key") instanceof String configured && !configured.isBlank()
+                    ? configured : i+1<steps.size()?(String)steps.get(i+1).get("step_key"):"end";
             if (step.get("kind").equals("REVIEW")) {
                 xml.append(flow(id,"gate_"+id,null));
                 xml.append(flow("gate_"+id,next,"${approved == true}"));
-                String back=first;
-                for (int j=i-1;j>=0;j--) if (steps.get(j).get("kind").equals("SUBMIT")) { back=(String)steps.get(j).get("step_key"); break; }
+                String back=step.get("reject_key") instanceof String rejected && !rejected.isBlank()
+                        ? rejected : first;
                 xml.append(flow("gate_"+id,back,"${approved == false}"));
             } else xml.append(flow(id,next,null));
         }
         return xml.append("</process></definitions>").toString();
+    }
+    private void validateGraph(List<Map<String,Object>> steps) {
+        var byKey = new java.util.HashMap<String,Map<String,Object>>();
+        for (var step : steps) byKey.put((String)step.get("step_key"),step);
+        if (!byKey.containsKey("submitProposal")) throw new IllegalArgumentException("Thiếu bước nộp đề cương");
+        var visited = new java.util.HashSet<String>();
+        var queue = new java.util.ArrayDeque<String>();
+        queue.add("submitProposal");
+        boolean reachesEnd = false;
+        while (!queue.isEmpty()) {
+            String key = queue.removeFirst();
+            if ("end".equals(key)) { reachesEnd = true; continue; }
+            if (!visited.add(key)) continue;
+            var step = byKey.get(key);
+            if (step == null) throw new IllegalArgumentException("Nhánh trỏ tới bước không tồn tại: "+key);
+            int index = steps.indexOf(step);
+            String next = step.get("next_key") instanceof String explicit && !explicit.isBlank()
+                    ? explicit : index+1<steps.size()?(String)steps.get(index+1).get("step_key"):"end";
+            queue.add(next);
+            if ("REVIEW".equals(step.get("kind"))) {
+                String rejected = (String)step.get("reject_key");
+                if (rejected==null || rejected.isBlank()) throw new IllegalArgumentException("Bước duyệt thiếu nhánh yêu cầu sửa: "+key);
+                if (rejected.equals(next)) throw new IllegalArgumentException("Hai nhánh duyệt không được trỏ tới cùng một bước: "+key);
+                queue.add(rejected);
+            }
+        }
+        if (!reachesEnd || visited.size()!=steps.size()) throw new IllegalArgumentException("Quy trình có bước không thể tới hoặc không có đường kết thúc");
     }
     private String flow(String from,String to,String condition) {
         String id="f_"+from+"_"+to;
         return "<sequenceFlow id=\""+id+"\" sourceRef=\""+from+"\" targetRef=\""+to+"\">"+
                 (condition==null?"":"<conditionExpression xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"tFormalExpression\"><![CDATA["+condition+"]]></conditionExpression>")+"</sequenceFlow>";
     }
-    private String escape(String value) { return value.replace("&","&amp;").replace("\"","&quot;").replace("<","&lt;"); }
-    public record StepInput(String key,String label,String kind,String role,Integer dueDays) {}
+    private String escape(String value) { return value.replace("&","&amp;").replace("\"","&quot;").replace("<","&lt;").replace(">","&gt;"); }
+    public record StepInput(String key,String label,String kind,String role,Integer dueDays,String nextKey,String rejectKey) {}
 }

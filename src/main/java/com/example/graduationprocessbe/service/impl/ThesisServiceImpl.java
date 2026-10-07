@@ -18,6 +18,7 @@ import com.example.graduationprocessbe.repository.MemberRepository;
 import com.example.graduationprocessbe.repository.ThesisRepository;
 import com.example.graduationprocessbe.repository.UserRepository;
 import com.example.graduationprocessbe.service.ThesisService;
+import com.example.graduationprocessbe.service.WorkflowPresentationService;
 import com.example.graduationprocessbe.util.PageUtil;
 import lombok.RequiredArgsConstructor;
 import org.flowable.engine.HistoryService;
@@ -45,6 +46,7 @@ public class ThesisServiceImpl implements ThesisService {
     private final UserMapper userMapper;
     private final RuntimeService runtimeService;
     private final HistoryService historyService;
+    private final WorkflowPresentationService presentation;
 
     @Override
     @Transactional(readOnly = true)
@@ -66,16 +68,14 @@ public class ThesisServiceImpl implements ThesisService {
             spec = spec.and((root, query, cb) -> cb.equal(root.get("lecturer").get("id"), lecturerId));
         }
         if (status != null && !status.isBlank()) {
-            spec = spec.and((root, query, cb) -> "PENDING_SUPERVISOR".equals(status)
-                    ? cb.and(root.get("currentStatus").in("PENDING_SUPERVISOR", "REGISTERED"), cb.isNull(root.get("processInstanceId")))
-                    : cb.equal(root.get("currentStatus"), status));
+            spec = spec.and((root, query, cb) -> cb.equal(root.get("currentStatus"), status));
         }
         if (phaseId != null && !phaseId.isBlank()) {
             spec = spec.and((root, query, cb) -> cb.equal(root.get("phaseId"), phaseId));
         }
         Page<Thesis> result = thesisRepository.findAll(spec,
                 PageUtil.of(page, size, sortBy, direction, SORT_FIELDS, "createdDate"));
-        return PageResponse.from(result, thesisMapper::toResponse);
+        return PageResponse.from(result, thesis -> presentation.describe(thesis, thesisMapper.toResponse(thesis)));
     }
 
     @Override
@@ -99,7 +99,8 @@ public class ThesisServiceImpl implements ThesisService {
                     .orElseThrow(() -> new ResourceNotFoundException(
                             "User not found: " + request.getLecturerId())));
         }
-        return thesisMapper.toResponse(thesisRepository.save(thesis));
+        thesis = thesisRepository.save(thesis);
+        return presentation.describe(thesis, thesisMapper.toResponse(thesis));
     }
 
     @Override
