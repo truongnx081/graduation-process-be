@@ -50,7 +50,16 @@ public class RoleServiceImpl implements RoleService {
         if ("ADMIN".equals(role.getRoleCode())) throw fixed();
         if (role.getPermissionsVersion()!=expectedVersion)
             throw error("STALE_PERMISSIONS","Phân quyền đã thay đổi. Tải lại dữ liệu trước khi lưu.",HttpStatus.CONFLICT);
-        List<String> ids=PermissionPolicy.normalize(requested,permissions.findAll(),menus.findAll());
+        var catalogue=permissions.findAll();
+        if (requested==null) throw new IllegalArgumentException("Cần danh sách quyền");
+        var selected=catalogue.stream().filter(p -> requested.contains(p.getId()) && "VIEW".equals(p.getAction()))
+            .map(Permission::getMenuCode).collect(Collectors.toSet());
+        var roleLimits=allowed.findByRoleId(roleId).stream().map(RoleAllowedPermission::getPermissionId).collect(Collectors.toSet());
+        // Selecting a screen grants its entire supported bundle. User restrictions are stored separately.
+        var expanded=catalogue.stream().filter(p -> Boolean.TRUE.equals(p.getEnabled()) && roleLimits.contains(p.getId())
+            && (selected.contains(p.getMenuCode()) || (p.getAction()==null && requested.contains(p.getId())))).map(Permission::getId).toList();
+        List<String> ids=PermissionPolicy.normalize(expanded,catalogue,menus.findAll());
+        if (!new HashSet<>(expanded).containsAll(requested)) throw new IllegalArgumentException("Chọn quyền truy cập màn hình hợp lệ");
         Set<String> limits=allowed.findByRoleId(roleId).stream().map(RoleAllowedPermission::getPermissionId).collect(Collectors.toSet());
         if (!limits.containsAll(ids)) throw error("ROLE_SCOPE","Quyền không thuộc phạm vi của vai trò này",HttpStatus.BAD_REQUEST);
         List<String> before=grants.findByRoleId(roleId).stream().map(RolePermission::getPermissionId).toList();

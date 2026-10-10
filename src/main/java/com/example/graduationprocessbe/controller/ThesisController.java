@@ -100,14 +100,14 @@ public class ThesisController {
     }
 
     @PutMapping("/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAuthority('THESIS_UPDATE')")
     public ResponseEntity<ApiResponseWrapper<ThesisResponse>> update(
             @PathVariable String id, @RequestBody @Valid UpdateThesisRequest request) {
         return ok(thesisService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAuthority('THESIS_DELETE')")
     public ResponseEntity<ApiResponseWrapper<Void>> delete(@PathVariable String id) {
         thesisService.delete(id);
         return ok(null);
@@ -148,14 +148,14 @@ public class ThesisController {
     }
 
     @PostMapping("/{id}/members/{userId}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAuthority('THESIS_UPDATE')")
     public ResponseEntity<ApiResponseWrapper<List<MemberResponse>>> addMember(
             @PathVariable String id, @PathVariable String userId) {
         return ok(thesisService.addMember(id, userId));
     }
 
     @DeleteMapping("/{id}/members/{userId}")
-    @PreAuthorize("hasRole('ADMIN')")
+    @PreAuthorize("hasAuthority('THESIS_DELETE')")
     public ResponseEntity<ApiResponseWrapper<List<MemberResponse>>> removeMember(
             @PathVariable String id, @PathVariable String userId) {
         return ok(thesisService.removeMember(id, userId));

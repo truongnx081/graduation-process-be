@@ -47,6 +47,9 @@ public class ThesisServiceImpl implements ThesisService {
     private final RuntimeService runtimeService;
     private final HistoryService historyService;
     private final WorkflowPresentationService presentation;
+    private final com.example.graduationprocessbe.service.PermissionGuard permissionGuard;
+    private final com.example.graduationprocessbe.service.CurrentUserService currentUser;
+    private final org.springframework.jdbc.core.JdbcTemplate jdbc;
 
     @Override
     @Transactional(readOnly = true)
@@ -82,6 +85,8 @@ public class ThesisServiceImpl implements ThesisService {
     @Transactional
     public ThesisResponse update(String id, UpdateThesisRequest request) {
         Thesis thesis = find(id);
+        permissionGuard.require("THESIS_UPDATE", thesis.getPhaseId());
+        requireManagement(thesis);
         if (request.getTitle() != null) {
             thesis.setTitle(request.getTitle());
         }
@@ -107,6 +112,8 @@ public class ThesisServiceImpl implements ThesisService {
     @Transactional
     public void delete(String id) {
         Thesis thesis = find(id);
+        requireManagement(thesis);
+        permissionGuard.require("THESIS_DELETE", thesis.getPhaseId());
         String processInstanceId = thesis.getProcessInstanceId();
         if (processInstanceId != null && runtimeService.createProcessInstanceQuery()
                 .processInstanceId(processInstanceId).count() > 0) {
@@ -127,6 +134,8 @@ public class ThesisServiceImpl implements ThesisService {
     @Transactional
     public List<MemberResponse> addMember(String thesisId, String userId) {
         Thesis thesis=find(thesisId);
+        permissionGuard.require("THESIS_UPDATE", thesis.getPhaseId());
+        requireManagement(thesis);
         if (thesis.getProcessInstanceId()!=null) throw new IllegalArgumentException("Thành viên nhóm được chốt khi đăng ký đề tài");
         User student=userRepository.findById(userId)
                 .orElseThrow(() -> new ResourceNotFoundException("User not found: " + userId));
@@ -145,6 +154,8 @@ public class ThesisServiceImpl implements ThesisService {
     @Transactional
     public List<MemberResponse> removeMember(String thesisId, String userId) {
         Thesis thesis=find(thesisId);
+        requireManagement(thesis);
+        permissionGuard.require("THESIS_DELETE", thesis.getPhaseId());
         if (thesis.getProcessInstanceId()!=null) throw new IllegalArgumentException("Thành viên nhóm được chốt khi đăng ký đề tài");
         if (thesis.getStudent().getId().equals(userId)) throw new IllegalArgumentException("Không được bỏ sinh viên đăng ký đề tài");
         MemberId key = new MemberId(userId, thesisId);
@@ -180,6 +191,13 @@ public class ThesisServiceImpl implements ThesisService {
                 .toList();
     }
 
+    private void requireManagement(Thesis thesis) {
+        var actor=currentUser.getCurrentUser().orElseThrow();
+        permissionGuard.require("VIEW_DS_HO_SO_TIEN_DO",thesis.getPhaseId());
+        if ("ADMIN".equals(actor.getUserType())) return;
+        Integer count=jdbc.queryForObject("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? AND r.role_code='FACULTY_STAFF' AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",Integer.class,actor.getId(),thesis.getPhaseId());
+        if (count==null || count==0) throw new org.springframework.security.access.AccessDeniedException("Không thuộc phạm vi quản lý hồ sơ");
+    }
     private Thesis find(String id) {
         return thesisRepository.findById(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Thesis not found: " + id));

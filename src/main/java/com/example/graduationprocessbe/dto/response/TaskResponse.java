@@ -12,6 +12,8 @@ import java.time.LocalDateTime;
 @NoArgsConstructor
 @JsonInclude(JsonInclude.Include.NON_NULL)
 public class TaskResponse {
+    private boolean canClaim;
+    private boolean canComplete;
     private String id;
     private String name;
     private String taskDefinitionKey;

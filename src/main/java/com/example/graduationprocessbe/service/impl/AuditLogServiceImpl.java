@@ -34,12 +34,12 @@ public class AuditLogServiceImpl implements AuditLogService {
     private final UserRepository userRepository;
     private final UserMapper userMapper;
     private final JsonMapper jsonMapper;
+    private final com.example.graduationprocessbe.service.CurrentUserService currentUserService;
 
     @Override
     @Transactional
     public AuditLogResponse create(CreateAuditLogRequest request) {
-        User actor = userRepository.findById(request.getActorId())
-                .orElseThrow(() -> new ResourceNotFoundException("User not found: " + request.getActorId()));
+        User actor = currentUserService.getCurrentUser().orElseThrow();
         Map<String, Object> payload = null;
         if (request.getPayload() != null && !request.getPayload().isBlank()) {
             try {

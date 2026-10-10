@@ -62,7 +62,7 @@ public class MenuServiceImpl implements MenuService {
                 .orElseThrow(() -> new ApplicationException(ResponseDetails.NOT_FOUND));
 
         validateHierarchy(id, request.getParentId(), request.getPath());
-        if (Set.of("users","roles","permissions","menus","nguoi-dung-phan-quyen").contains(menu.getCode())
+        if (Set.of("users","roles","permissions","menus","nguoi-dung-phan-quyen","user-permissions").contains(menu.getCode())
             && (Boolean.FALSE.equals(request.getActive()) || !Objects.equals(menu.getParentId(),request.getParentId())
                 || !Objects.equals(menu.getPath(),request.getPath()))) throw invalid("Không được ẩn hoặc đổi đường dẫn/nhóm của menu quản trị cốt lõi");
         request.setPermissionCode(menu.getPermissionCode());

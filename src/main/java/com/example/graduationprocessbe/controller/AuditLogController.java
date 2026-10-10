@@ -6,6 +6,7 @@ import com.example.graduationprocessbe.dto.request.CreateAuditLogRequest;
 import com.example.graduationprocessbe.dto.response.AuditLogResponse;
 import com.example.graduationprocessbe.service.AuditLogService;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import lombok.RequiredArgsConstructor;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.ResponseEntity;
@@ -23,12 +24,14 @@ import static com.example.graduationprocessbe.util.ApiResponses.ok;
 
 @RestController
 @RequestMapping("/api/audit-logs")
+@PreAuthorize("hasAuthority('VIEW_NHAT_KY_THAO_TAC')")
 @RequiredArgsConstructor
 public class AuditLogController {
 
     private final AuditLogService auditLogService;
 
     /** Ghi log thủ công. payload (nếu có) phải là JSON hợp lệ. */
+    @PreAuthorize("hasAuthority('AUDIT_CREATE')")
     @PostMapping
     public ResponseEntity<ApiResponseWrapper<AuditLogResponse>> create(
             @RequestBody @Valid CreateAuditLogRequest request) {

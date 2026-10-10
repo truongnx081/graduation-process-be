@@ -1,5 +1,8 @@
 -- PostgreSQL RBAC initialization and forward-only upgrades. Keep historical steps for existing DBs.
 -- Shared versioned menu/RBAC baseline. Existing IDs and custom grants are preserved.
+-- Hibernate creates the base tables before this script runs. Add this column before
+-- any user writes can queue deferred account-role constraint triggers in this transaction.
+ALTER TABLE users ADD COLUMN IF NOT EXISTS permissions_version bigint NOT NULL DEFAULT 0;
 CREATE TABLE IF NOT EXISTS app_seed_versions (version varchar(100) PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now());
 DO $seed$
 BEGIN
@@ -1162,3 +1165,257 @@ BEGIN
     UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code='ADMIN';
     INSERT INTO app_seed_versions(version) VALUES('round-schedule-menu-v25');
 END $round_schedule_v25$;
+
+-- User permission overrides and demo accounts.
+-- Forward-only auth migration. Loaded after the existing versioned baseline.
+DO $auth_v1$
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261010,1);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='auth-screen-bundles-v1') THEN RETURN; END IF;
+  CREATE TABLE IF NOT EXISTS user_permission_denies (
+    id varchar(36) PRIMARY KEY, user_id varchar(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    permission_id varchar(36) NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+    thesis_round_id varchar(36) REFERENCES thesis_rounds(id) ON DELETE CASCADE,
+    created_by varchar(50),last_modified_by varchar(50),created_date timestamp,last_modified_date timestamp
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS ux_user_deny_global ON user_permission_denies(user_id,permission_id) WHERE thesis_round_id IS NULL;
+  CREATE UNIQUE INDEX IF NOT EXISTS ux_user_deny_round ON user_permission_denies(user_id,permission_id,thesis_round_id) WHERE thesis_round_id IS NOT NULL;
+  INSERT INTO menus(id,code,label,path,icon,sort_order,active,parent_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,v.code,v.label,v.path,'SafetyCertificateOutlined',v.ord,v.code='user-permissions',
+    CASE WHEN v.code='user-permissions' THEN (SELECT id FROM menus WHERE code='nguoi-dung-phan-quyen') ELSE NULL END,now(),now()
+  FROM (VALUES ('user-permissions','Phân quyền người dùng','/admin/user-permissions',143),
+    ('khoa-bo-mon','Khoa / Bộ môn','/catalogs/departments',160),
+    ('nhat-ky-thao-tac','Nhật ký thao tác','/settings/audit',170),
+    ('tac-vu-quy-trinh','Tác vụ quy trình','/tasks',110)) v(code,label,path,ord)
+  ON CONFLICT(code) DO NOTHING;
+  INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,'VIEW_'||upper(replace(m.code,'-','_')),'Truy cập: '||m.label,'MENU',m.code,'VIEW',true,now(),now()
+  FROM menus m WHERE m.code IN ('user-permissions','khoa-bo-mon','nhat-ky-thao-tac','tac-vu-quy-trinh') ON CONFLICT(code) DO NOTHING;
+  UPDATE menus SET permission_code='VIEW_'||upper(replace(code,'-','_')) WHERE code IN ('user-permissions','khoa-bo-mon','nhat-ky-thao-tac','tac-vu-quy-trinh');
+  INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,v.code,v.name,'MENU_ACTION',v.menu,v.action,true,now(),now()
+  FROM (VALUES
+    ('USER_PERMISSIONS_UPDATE','Sửa giới hạn quyền người dùng','user-permissions','UPDATE'),
+    ('DEPARTMENTS_CREATE','Thêm khoa / bộ môn','khoa-bo-mon','CREATE'),
+    ('DEPARTMENTS_UPDATE','Sửa khoa / bộ môn','khoa-bo-mon','UPDATE'),
+    ('DEPARTMENTS_DELETE','Xóa khoa / bộ môn','khoa-bo-mon','DELETE'),
+    ('CALENDAR_CREATE','Thêm năm học / học kỳ','nam-hoc','CREATE'),
+    ('CALENDAR_UPDATE','Sửa năm học / học kỳ','nam-hoc','UPDATE'),
+    ('ROUNDS_CREATE','Tạo đợt / thêm giảng viên','ds-dot-do-an','CREATE'),
+    ('ROUNDS_UPDATE','Sửa đợt / gán quy trình','ds-dot-do-an','UPDATE'),
+    ('ROUNDS_DELETE','Bỏ giảng viên khỏi đợt','ds-dot-do-an','DELETE'),
+    ('WORKFLOW_CREATE','Tạo bản nháp','cau-hinh-quy-trinh','CREATE'),
+    ('WORKFLOW_UPDATE','Sửa bản nháp','cau-hinh-quy-trinh','UPDATE'),
+    ('WORKFLOW_APPROVE','Công bố quy trình','cau-hinh-quy-trinh','APPROVE'),
+    ('SCHEDULE_CREATE','Tạo thông báo','moc-nop-thong-bao','CREATE'),
+    ('SCHEDULE_UPDATE','Sửa lịch / mốc nộp','moc-nop-thong-bao','UPDATE'),
+    ('THESIS_CREATE','Đăng ký đề tài','dang-ky-de-tai','CREATE'),
+    ('THESIS_UPDATE','Sửa hồ sơ','ds-ho-so-tien-do','UPDATE'),
+    ('THESIS_DELETE','Xóa hồ sơ','ds-ho-so-tien-do','DELETE'),
+    ('TASKS_UPDATE','Nhận việc / nộp hồ sơ','tac-vu-quy-trinh','UPDATE'),
+    ('TASKS_APPROVE','Duyệt tác vụ','tac-vu-quy-trinh','APPROVE'),
+    ('AUDIT_CREATE','Ghi chú nhật ký','nhat-ky-thao-tac','CREATE')) v(code,name,menu,action)
+  JOIN menus m ON m.code=v.menu ON CONFLICT(code) DO UPDATE SET enabled=true,action=excluded.action,menu_code=excluded.menu_code;
+  -- Expand each role's existing screen limits to include supported actions.
+  INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+  WHERE p.enabled AND (r.role_code='ADMIN'
+    OR (p.menu_code='tac-vu-quy-trinh')
+    OR (r.role_code='FACULTY_STAFF' AND p.menu_code IN ('khoa-bo-mon','nam-hoc','ds-dot-do-an','cau-hinh-quy-trinh','moc-nop-thong-bao','ds-ho-so-tien-do','nhat-ky-thao-tac'))
+    OR EXISTS(SELECT 1 FROM role_allowed_permissions a JOIN permissions v ON v.id=a.permission_id
+      WHERE a.role_id=r.id AND v.action='VIEW' AND v.menu_code=p.menu_code))
+  ON CONFLICT(role_id,permission_id) DO NOTHING;
+  -- Existing selected screens become full bundles, including demo business screens for faculty.
+  INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,a.role_id,a.permission_id,now(),now() FROM role_allowed_permissions a
+  JOIN permissions p ON p.id=a.permission_id JOIN roles r ON r.id=a.role_id
+  WHERE p.enabled AND (r.role_code='ADMIN' OR p.menu_code='tac-vu-quy-trinh'
+    OR (r.role_code='FACULTY_STAFF' AND p.menu_code IN ('khoa-bo-mon','nam-hoc','ds-dot-do-an','cau-hinh-quy-trinh','moc-nop-thong-bao','ds-ho-so-tien-do','nhat-ky-thao-tac'))
+    OR EXISTS(SELECT 1 FROM role_permissions g JOIN permissions v ON v.id=g.permission_id
+      WHERE g.role_id=a.role_id AND v.action='VIEW' AND v.menu_code=p.menu_code))
+  ON CONFLICT(role_id,permission_id) DO NOTHING;
+  UPDATE roles SET permissions_version=permissions_version+1;
+  INSERT INTO app_seed_versions(version) VALUES('auth-screen-bundles-v1');
+END $auth_v1$;
+
+-- Local demo accounts, loaded with the single initialization script.
+-- Password for these accounts: admin123.
+-- Versioned: restarting never restores restrictions changed during a demo.
+DO $auth_demo$
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261010,2);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='auth-demo-v1') THEN RETURN; END IF;
+  INSERT INTO users(id,username,email,full_name,password_hash,user_type,status,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,v.username,v.username||'@graduation.local',v.name,
+    '$2a$10$ctVd2m8G2Nc2RRpYTyl6zOtBbasSqZsDt9WF1ysgY3z005.lDPSl.','LECTURER','ACTIVE',now(),now()
+  FROM (VALUES ('demo.full','Nguyễn Minh Quân'),('demo.view1','Trần Thu Hà'),
+    ('demo.view2','Lê Hoàng Nam')) v(username,name) ON CONFLICT(username) DO NOTHING;
+  INSERT INTO user_roles(id,user_id,role_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,u.id,r.id,now(),now() FROM users u CROSS JOIN roles r
+  WHERE u.username IN ('demo.full','demo.view1','demo.view2') AND r.role_code IN ('LECTURER','FACULTY_STAFF')
+    AND NOT EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.thesis_round_id IS NULL);
+  INSERT INTO user_permission_denies(id,user_id,permission_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,u.id,p.id,now(),now() FROM users u CROSS JOIN permissions p
+  WHERE u.username IN ('demo.view1','demo.view2') AND p.enabled AND p.action<>'VIEW'
+  ON CONFLICT DO NOTHING;
+  INSERT INTO departments(id,dept_code,dept_name,created_date,last_modified_date)
+  VALUES('auth-demo-department','DEMO-AUTH','Khoa Công nghệ thông tin',now(),now()) ON CONFLICT DO NOTHING;
+  INSERT INTO app_seed_versions(version) VALUES('auth-demo-v1');
+END $auth_demo$;
+
+-- Admin navigation is a group only: permissions belong to its concrete child screens.
+DO $admin_child_menu_permissions_v2$
+DECLARE
+  menu_key varchar;
+  view_code varchar;
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261010,3);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='admin-child-menu-permissions-v2') THEN RETURN; END IF;
+  UPDATE menus SET permission_code=NULL WHERE code='nguoi-dung-phan-quyen';
+  FOREACH menu_key IN ARRAY ARRAY['users','roles','menus','user-permissions'] LOOP
+    view_code := CASE menu_key
+      WHEN 'users' THEN 'VIEW_USERS'
+      WHEN 'roles' THEN 'VIEW_ROLES'
+      WHEN 'menus' THEN 'VIEW_MENUS'
+      ELSE 'VIEW_USER_PERMISSIONS' END;
+    INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,view_code,'Truy cập: '||menu_key,'MENU',menu_key,'VIEW',true,now(),now())
+    ON CONFLICT(code) DO UPDATE SET menu_code=EXCLUDED.menu_code,action='VIEW',enabled=true;
+    UPDATE menus SET permission_code=view_code WHERE menus.code=menu_key;
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+      SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+      WHERE r.role_code='ADMIN' AND p.code=view_code ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+      SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+      WHERE r.role_code='ADMIN' AND p.code=view_code ON CONFLICT(role_id,permission_id) DO NOTHING;
+  END LOOP;
+  DELETE FROM role_permissions rp USING roles r, permissions p
+    WHERE rp.role_id=r.id AND rp.permission_id=p.id AND r.role_code<>'ADMIN'
+      AND p.menu_code IN ('users','roles','menus','user-permissions');
+  DELETE FROM role_allowed_permissions ra USING roles r, permissions p
+    WHERE ra.role_id=r.id AND ra.permission_id=p.id AND r.role_code<>'ADMIN'
+      AND p.menu_code IN ('users','roles','menus','user-permissions');
+  UPDATE roles SET permissions_version=permissions_version+1;
+  INSERT INTO app_seed_versions(version) VALUES('admin-child-menu-permissions-v2');
+END $admin_child_menu_permissions_v2$;
+
+-- Optional workflow demo catalogue. Scenario execution stays in DemoDataSeeder so
+-- processes, tasks and history are created through Flowable, never by SQL inserts.
+DO $workflow_demo_catalog$
+DECLARE
+  demo_year integer := extract(year FROM current_date)::integer;
+BEGIN
+  IF coalesce(nullif(current_setting('app.seed_demo',true),''),'false')::boolean IS NOT TRUE THEN RETURN; END IF;
+  PERFORM pg_advisory_xact_lock(20261007,25);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='demo-comprehensive-v5') THEN RETURN; END IF;
+
+  CREATE TEMP TABLE demo_rounds(slot varchar(20) PRIMARY KEY,id varchar(36)) ON COMMIT DROP;
+  CREATE TEMP TABLE demo_case_plan(
+    case_no integer, round_slot varchar(20), student_username varchar(50), lecturer_username varchar(50),
+    partner_username varchar(50), title varchar(255), summary text, target_step varchar(60),
+    reject_proposal boolean, overdue_days integer
+  ) ON COMMIT DROP;
+
+  INSERT INTO users(id,username,email,full_name,password_hash,user_type,status,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,v.username,v.username||'@graduation.local',v.full_name,
+    '$2a$10$ctVd2m8G2Nc2RRpYTyl6zOtBbasSqZsDt9WF1ysgY3z005.lDPSl.',v.actor,'ACTIVE',now(),now()
+  FROM (
+    SELECT 'demo.student.'||n AS username,(ARRAY['Nguyễn Hoàng Anh','Trần Ngọc Linh','Lê Minh Đức','Phạm Thu Trang','Hoàng Gia Bảo','Vũ Phương Thảo','Đặng Quang Huy','Bùi Khánh Vy','Đỗ Tiến Dũng','Ngô Thanh Mai','Dương Hải Đăng','Lý Bảo Ngọc','Võ Thành Đạt','Đinh Thùy Dương','Mai Đức Anh'])[n] AS full_name,'STUDENT' AS actor FROM generate_series(1,15) n
+    UNION ALL SELECT 'demo.lecturer','Nguyễn Văn Phúc','LECTURER'
+    UNION ALL SELECT 'khoa','Trần Quốc Khánh','LECTURER'
+    UNION ALL SELECT 'committee','Lê Thị Hồng Nhung','LECTURER'
+  ) v ON CONFLICT(username) DO NOTHING;
+  IF EXISTS(SELECT 1 FROM users WHERE username IN ('demo.lecturer','khoa','committee') AND user_type<>'LECTURER')
+    OR EXISTS(SELECT 1 FROM users WHERE username IN (SELECT 'demo.student.'||n FROM generate_series(1,15) n) AND user_type<>'STUDENT') THEN
+    RAISE EXCEPTION 'Demo usernames are occupied by incompatible account types';
+  END IF;
+  INSERT INTO user_roles(id,user_id,role_id,created_date,last_modified_date)
+  SELECT gen_random_uuid()::text,u.id,r.id,now(),now() FROM users u JOIN roles r
+    ON r.role_code=u.user_type OR (u.username='khoa' AND r.role_code='FACULTY_STAFF')
+    OR (u.username='committee' AND r.role_code='COMMITTEE')
+  WHERE (u.username IN ('demo.lecturer','khoa','committee') OR u.username IN (SELECT 'demo.student.'||n FROM generate_series(1,15) n))
+    AND NOT EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.thesis_round_id IS NULL);
+
+  INSERT INTO academic_years(id,code,start_year,end_year)
+    VALUES(gen_random_uuid()::text,demo_year||'-'||(demo_year+1),demo_year,demo_year+1)
+    ON CONFLICT(code) DO NOTHING;
+  INSERT INTO semesters(id,academic_year_id,number)
+    SELECT gen_random_uuid()::text,y.id,3 FROM academic_years y WHERE y.code=demo_year||'-'||(demo_year+1)
+    ON CONFLICT(academic_year_id,number) DO NOTHING;
+  INSERT INTO thesis_rounds(id,code,name,semester_id,active,registration_opens_at,registration_closes_at,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,'DEMO-WORKFLOW-'||demo_year,'Đợt đồ án học kỳ 3 - '||demo_year,s.id,true,
+      now()-interval '30 days',now()+interval '90 days',now(),now()
+    FROM semesters s JOIN academic_years y ON y.id=s.academic_year_id
+    WHERE y.code=demo_year||'-'||(demo_year+1) AND s.number=3
+    ON CONFLICT DO NOTHING;
+  -- Do not take over a semester already used by a real round.
+  INSERT INTO demo_rounds(slot,id) SELECT 'current',id FROM thesis_rounds WHERE code='DEMO-WORKFLOW-'||demo_year;
+  INSERT INTO round_lecturers(id,round_id,lecturer_id,orientation,active)
+    SELECT gen_random_uuid()::text,d.id,u.id,'Ứng dụng công nghệ thông tin trong quản lý đồ án',true
+    FROM demo_rounds d CROSS JOIN users u WHERE u.username='demo.lecturer'
+    ON CONFLICT(round_id,lecturer_id) DO NOTHING;
+  INSERT INTO round_step_windows(id,round_id,step_key,opens_at,closes_at)
+    SELECT gen_random_uuid()::text,d.id,s.step_key,now()-interval '30 days',now()+interval '90 days'
+    FROM demo_rounds d CROSS JOIN workflow_steps s
+    WHERE s.template_id='core-template-v2' AND (s.kind='SUBMIT' OR s.step_key='registerThesis')
+    ON CONFLICT(round_id,step_key) DO NOTHING;
+  INSERT INTO demo_case_plan
+    SELECT n,'current','demo.student.'||n,'demo.lecturer',NULL,
+      'Hệ thống quản lý học tập - Nhóm '||n,
+      'Hồ sơ minh họa các bước nộp, phản hồi, phê duyệt và bảo vệ đồ án.',
+      (ARRAY['reviewProposal','submitProposal','advisorSignature','submitSignedProposal','facultyFinalApproval',
+        'registerThesis','confirmGuidance','midtermReport','reviewMidterm','finalReport','advisorFinalReview',
+        'submitCouncil','councilAccept','scheduleDefense','COMPLETED'])[n],
+      n=2,CASE WHEN n IN (3,9,13) THEN 3 ELSE 0 END
+    FROM generate_series(1,15) n;
+END $workflow_demo_catalog$;
+
+-- Correct existing installations as well as fresh seeds. Never overwrite edited names.
+DO $leaf_permissions_and_names$
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261010,4);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='leaf-permissions-realistic-names-v1') THEN RETURN; END IF;
+  DELETE FROM user_permission_denies d USING permissions p, menus m
+    WHERE d.permission_id=p.id AND p.menu_code=m.code
+      AND (m.path IS NULL OR m.path NOT LIKE '/%' OR EXISTS(SELECT 1 FROM menus child WHERE child.parent_id=m.id));
+  UPDATE users u SET full_name=v.new_name,last_modified_date=now()
+    FROM (VALUES
+      ('demo.full','Demo Khoa - toàn quyền','Nguyễn Minh Quân'),
+      ('demo.view1','Demo Khoa - chỉ xem 1','Trần Thu Hà'),
+      ('demo.view2','Demo Khoa - chỉ xem 2','Lê Hoàng Nam'),
+      ('demo.lecturer','Giảng viên demo','Nguyễn Văn Phúc'),
+      ('khoa','Cán bộ Khoa demo','Trần Quốc Khánh'),
+      ('committee','Thành viên Hội đồng demo','Lê Thị Hồng Nhung')
+    ) v(username,old_name,new_name)
+    WHERE u.username=v.username AND u.full_name=v.old_name;
+  UPDATE users u SET full_name=v.new_name,last_modified_date=now()
+    FROM (SELECT n,(ARRAY['Nguyễn Hoàng Anh','Trần Ngọc Linh','Lê Minh Đức','Phạm Thu Trang','Hoàng Gia Bảo',
+      'Vũ Phương Thảo','Đặng Quang Huy','Bùi Khánh Vy','Đỗ Tiến Dũng','Ngô Thanh Mai','Dương Hải Đăng',
+      'Lý Bảo Ngọc','Võ Thành Đạt','Đinh Thùy Dương','Mai Đức Anh'])[n] AS new_name FROM generate_series(1,15) n) v
+    WHERE u.username='demo.student.'||v.n AND u.full_name='Sinh viên demo '||v.n;
+  UPDATE departments SET dept_name='Khoa Công nghệ thông tin'
+    WHERE id='auth-demo-department' AND dept_name='Khoa demo phân quyền';
+  UPDATE thesis_rounds SET name='Đợt đồ án học kỳ 3 - '||substring(code FROM 15)
+    WHERE code LIKE 'DEMO-WORKFLOW-%' AND name='Đợt demo quy trình '||substring(code FROM 15);
+  UPDATE theses t SET title='Hệ thống quản lý học tập - Nhóm '||v.n
+    FROM generate_series(1,15) v(n), users u
+    WHERE t.student_id=u.id AND u.username='demo.student.'||v.n
+      AND t.title='Đồ án demo '||v.n||': Hệ thống quản lý học tập';
+  UPDATE users SET permissions_version=permissions_version+1;
+  INSERT INTO app_seed_versions(version) VALUES('leaf-permissions-realistic-names-v1');
+END $leaf_permissions_and_names$;
+
+-- Restore main's navigation: only user-permissions is a new visible screen.
+-- Retain inactive permission anchors so existing task API checks and restrictions remain valid.
+DO $restore_main_navigation$
+BEGIN
+  PERFORM pg_advisory_xact_lock(20261010,5);
+  IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='restore-main-navigation-v1') THEN RETURN; END IF;
+  UPDATE menus SET active=false,last_modified_date=now()
+    WHERE code IN ('khoa-bo-mon','nhat-ky-thao-tac','tac-vu-quy-trinh');
+  UPDATE menus SET active=true,parent_id=(SELECT id FROM menus WHERE code='nguoi-dung-phan-quyen'),
+    path='/admin/user-permissions',sort_order=143,last_modified_date=now() WHERE code='user-permissions';
+  INSERT INTO menu_actor_visibility(menu_code,user_type) VALUES('nguoi-dung-phan-quyen','ADMIN')
+    ON CONFLICT DO NOTHING;
+  INSERT INTO app_seed_versions(version) VALUES('restore-main-navigation-v1');
+END $restore_main_navigation$;

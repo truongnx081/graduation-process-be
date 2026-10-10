@@ -37,7 +37,7 @@ public class DataInitializer implements ApplicationRunner {
     @Override
     @Transactional
     public void run(ApplicationArguments args) throws Exception {
-        // One file contains the versioned baseline and forward-only upgrades.
+        // One file contains the baseline, permission migration, and demo seed data.
         // PostgreSQL executes the complete script in this transaction.
         String seed = new ClassPathResource("seed_rbac_and_menus.sql")
                 .getContentAsString(StandardCharsets.UTF_8);
@@ -48,6 +48,8 @@ public class DataInitializer implements ApplicationRunner {
         jdbcTemplate.queryForObject("SELECT set_config('app.bootstrap.password_hash', ?, true)", String.class,
                 bootstrapPassword == null || bootstrapPassword.isEmpty()
                         ? "" : passwordEncoder.encode(bootstrapPassword));
+        jdbcTemplate.queryForObject("SELECT set_config('app.seed_demo', ?, true)", String.class,
+                Boolean.toString(seedDemo));
         jdbcTemplate.execute(seed);
         String baselineDefinition = jdbcTemplate.queryForObject(
                 "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
@@ -56,6 +58,7 @@ public class DataInitializer implements ApplicationRunner {
         ensureUser("admin", "admin@graduation.local", "Quản trị viên Nguyễn Văn An", role("ADMIN"), "ADMIN");
         if (seedDemo) {
             demoDataSeeder.seed();
+
         }
         if (userRoleRepository.countActiveGlobalAdmins()==0)
             throw new IllegalStateException("Cần ít nhất một ADMIN toàn hệ thống đang hoạt động");
