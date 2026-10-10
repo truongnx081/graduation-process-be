@@ -15,6 +15,7 @@ import java.util.stream.Collectors;
 public class UserPermissionService {
     private final UserPermissionDenyRepository denies;
     private final PermissionRepository permissions;
+    private final MenuRepository menus;
     private final UserRepository users;
     private final ThesisRoundRepository rounds;
     private final EffectivePermissionService effective;
@@ -41,9 +42,15 @@ public class UserPermissionService {
         if (effective.isGlobalAdmin(userId)) throw new IllegalArgumentException("Không giới hạn quyền của ADMIN hệ thống");
         if (version!=expectedVersion) throw new ApplicationException("STALE_PERMISSIONS","Quyền đã thay đổi, hãy tải lại trước khi lưu",HttpStatus.CONFLICT);
         Set<String> ids=new LinkedHashSet<>(Objects.requireNonNull(requested));
-        Set<String> supported=permissions.findAll().stream().filter(p -> Boolean.TRUE.equals(p.getEnabled()))
+        var menuCatalogue=menus.findAll();
+        Set<String> parentIds=menuCatalogue.stream().map(m -> m.getParentId()).filter(Objects::nonNull).collect(Collectors.toSet());
+        Set<String> screenCodes=menuCatalogue.stream()
+            .filter(m -> !parentIds.contains(m.getId()) && m.getPath()!=null && m.getPath().startsWith("/"))
+            .map(m -> m.getCode()).collect(Collectors.toSet());
+        Set<String> supported=permissions.findAll().stream().filter(p -> Boolean.TRUE.equals(p.getEnabled())
+            && p.getAction()!=null && screenCodes.contains(p.getMenuCode()))
             .map(p -> p.getId()).collect(Collectors.toSet());
-        if (!supported.containsAll(ids)) throw new IllegalArgumentException("Quyền không tồn tại hoặc đã ngừng hỗ trợ");
+        if (!supported.containsAll(ids)) throw new IllegalArgumentException("Chỉ cấu hình quyền trên menu màn hình có URL và không có menu con");
         var old=denies.findByUserId(userId).stream().filter(d -> Objects.equals(roundId,d.getThesisRoundId())).toList();
         var before=old.stream().map(UserPermissionDeny::getPermissionId).toList();
         denies.deleteAll(old); denies.flush();

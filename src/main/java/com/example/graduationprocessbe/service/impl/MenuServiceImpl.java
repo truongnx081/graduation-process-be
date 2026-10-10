@@ -114,7 +114,10 @@ public class MenuServiceImpl implements MenuService {
         // A leaf node is visible if permissionCode is null/empty or in userPermissions
         // A parent node is visible if it has at least one visible child!
         List<MenuResponse> permitted = filterByPermissions(rootNodes, userPermissions);
-        return permitted;
+        String actor = users.findById(userId).orElseThrow().getUserType();
+        Set<String> governed = new HashSet<>(jdbc.queryForList("SELECT DISTINCT menu_code FROM menu_actor_visibility", String.class));
+        Set<String> visible = new HashSet<>(jdbc.queryForList("SELECT menu_code FROM menu_actor_visibility WHERE user_type=?", String.class, actor));
+        return permitted.stream().filter(root -> !governed.contains(root.getCode()) || visible.contains(root.getCode())).toList();
     }
 
     @Override
@@ -181,11 +184,10 @@ public class MenuServiceImpl implements MenuService {
         permission.setCode(code); permission.setName("Truy cập / Xem: " + label);
         permission.setModule("MENU"); permission.setMenuCode(menuCode); permission.setAction("VIEW"); permission.setEnabled(true);
         permissionRepository.save(permission);
-        for (var role : roles.findAll()) {
-            if (!allowed.existsByRoleIdAndPermissionId(role.getId(),permission.getId())) {
-                var access = new com.example.graduationprocessbe.entity.RoleAllowedPermission();
-                access.setRoleId(role.getId()); access.setPermissionId(permission.getId()); allowed.save(access);
-            }
+        var admin = roles.findByRoleCode("ADMIN").orElseThrow();
+        if (!allowed.existsByRoleIdAndPermissionId(admin.getId(),permission.getId())) {
+            var access = new com.example.graduationprocessbe.entity.RoleAllowedPermission();
+            access.setRoleId(admin.getId()); access.setPermissionId(permission.getId()); allowed.save(access);
         }
         return code;
     }

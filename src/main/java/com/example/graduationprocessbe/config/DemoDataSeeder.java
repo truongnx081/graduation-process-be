@@ -11,13 +11,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.RuntimeService;
 import org.flowable.engine.TaskService;
 import org.flowable.task.api.Task;
-import org.springframework.core.io.ClassPathResource;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Component;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.io.IOException;
-import java.nio.charset.StandardCharsets;
 import java.time.Instant;
 import java.time.LocalDateTime;
 import java.time.OffsetDateTime;
@@ -45,15 +42,19 @@ public class DemoDataSeeder {
     private final AuditLogService audit;
 
     @Transactional
-    public void seed() throws IOException {
+    public void seed() {
         jdbc.execute("SELECT pg_advisory_xact_lock(20261007, 25)");
         if (Boolean.TRUE.equals(jdbc.queryForObject(
                 "SELECT EXISTS(SELECT 1 FROM app_seed_versions WHERE version=?)", Boolean.class, VERSION))) return;
-        jdbc.execute(new ClassPathResource("seed_demo_data.sql").getContentAsString(StandardCharsets.UTF_8));
+        // The single initialization script prepares demo tables before the template is published.
+        jdbc.update("UPDATE thesis_rounds SET workflow_definition_id=" +
+                "(SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2') " +
+                "WHERE id IN (SELECT id FROM demo_rounds) AND workflow_definition_id IS NULL");
         var steps = core.steps("core-template-v2").stream()
                 .collect(Collectors.toMap(s -> (String) s.get("step_key"), Function.identity()));
         var scenarios = jdbc.queryForList("SELECT p.*,r.id AS round_id,r.workflow_definition_id " +
-                "FROM demo_case_plan p JOIN demo_rounds r ON r.slot=p.round_slot ORDER BY p.case_no");
+                "FROM demo_case_plan p JOIN demo_rounds d ON d.slot=p.round_slot " +
+                "JOIN thesis_rounds r ON r.id=d.id ORDER BY p.case_no");
         int created = 0;
         for (var scenario : scenarios) {
             if (seedCase(scenario, steps)) created++;

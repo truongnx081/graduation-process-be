@@ -48,6 +48,8 @@ public class DataInitializer implements ApplicationRunner {
         jdbcTemplate.queryForObject("SELECT set_config('app.bootstrap.password_hash', ?, true)", String.class,
                 bootstrapPassword == null || bootstrapPassword.isEmpty()
                         ? "" : passwordEncoder.encode(bootstrapPassword));
+        jdbcTemplate.queryForObject("SELECT set_config('app.seed_demo', ?, true)", String.class,
+                Boolean.toString(seedDemo));
         jdbcTemplate.execute(seed);
         String baselineDefinition = jdbcTemplate.queryForObject(
                 "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
