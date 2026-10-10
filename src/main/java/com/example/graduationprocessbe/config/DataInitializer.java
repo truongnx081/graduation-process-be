@@ -25,6 +25,8 @@ public class DataInitializer implements ApplicationRunner {
     private String bootstrapPassword;
     @org.springframework.beans.factory.annotation.Value("${app.seed-demo:false}")
     private boolean seedDemo;
+    @org.springframework.beans.factory.annotation.Value("${app.seed-auth-demo:true}")
+    private boolean seedAuthDemo;
 
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
@@ -49,6 +51,8 @@ public class DataInitializer implements ApplicationRunner {
                 bootstrapPassword == null || bootstrapPassword.isEmpty()
                         ? "" : passwordEncoder.encode(bootstrapPassword));
         jdbcTemplate.execute(seed);
+        jdbcTemplate.execute(new ClassPathResource("migrate_user_permissions.sql").getContentAsString(StandardCharsets.UTF_8));
+        if (seedAuthDemo) jdbcTemplate.execute(new ClassPathResource("seed_auth_demo.sql").getContentAsString(StandardCharsets.UTF_8));
         String baselineDefinition = jdbcTemplate.queryForObject(
                 "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
         if (baselineDefinition == null) workflowService.publish("core-template-v2");
@@ -56,6 +60,7 @@ public class DataInitializer implements ApplicationRunner {
         ensureUser("admin", "admin@graduation.local", "Quản trị viên Nguyễn Văn An", role("ADMIN"), "ADMIN");
         if (seedDemo) {
             demoDataSeeder.seed();
+
         }
         if (userRoleRepository.countActiveGlobalAdmins()==0)
             throw new IllegalStateException("Cần ít nhất một ADMIN toàn hệ thống đang hoạt động");

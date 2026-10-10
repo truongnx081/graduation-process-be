@@ -48,12 +48,14 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     private final AuditLogService auditLogService;
     private final CurrentUserService currentUserService;
     private final JdbcTemplate jdbc;
+    private final com.example.graduationprocessbe.service.PermissionGuard permissionGuard;
     private final WorkflowPresentationService presentation;
     private final WorkflowMailService workflowMail;
 
     @Override
     @Transactional
     public ThesisResponse createThesis(CreateThesisRequest request) {
+        permissionGuard.require("THESIS_CREATE",request.getPhaseId());
         User actor=currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!"STUDENT".equals(actor.getUserType()) || !actor.getId().equals(request.getStudentId()))
             throw new AccessDeniedException("Chỉ sinh viên được đăng ký đề tài của mình");
@@ -142,6 +144,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         Task task=thesis.getProcessInstanceId()==null ? null : taskService.createTaskQuery()
                 .processInstanceId(thesis.getProcessInstanceId()).taskDefinitionKey("confirmGuidance").singleResult();
         if (task==null) throw new IllegalArgumentException("Hồ sơ hiện chưa đến bước xác nhận hướng dẫn");
+        permissionGuard.require("TASKS_APPROVE",thesis.getPhaseId());
         if (task.getAssignee()==null) taskService.claim(task.getId(),actor.getId());
         String note = comment == null ? "" : comment.trim();
         if (note.length() > 2000) throw new IllegalArgumentException("Nhận xét tối đa 2000 ký tự");
@@ -156,6 +159,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     @Override
     @Transactional
     public ThesisResponse resubmitRegistration(String thesisId, String title, String lecturerId) {
+        permissionGuard.require("TASKS_UPDATE",findThesis(thesisId).getPhaseId());
         jdbc.queryForObject("SELECT id FROM theses WHERE id=? FOR UPDATE", String.class, thesisId);
         Thesis thesis = findThesis(thesisId);
         User actor = currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
@@ -254,6 +258,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         User actor=currentUserService.getCurrentUser().orElseThrow(() -> new AccessDeniedException("Cần đăng nhập"));
         if (!actor.getId().equals(userId)) throw new AccessDeniedException("Chỉ được nhận việc cho bản thân");
         authorizeTask(task,actor);
+        permissionGuard.require("TASKS_UPDATE",taskRound(task));
         findUser(userId);
         taskService.claim(taskId, userId);
         return toTaskResponse(findTask(taskId));
@@ -270,7 +275,11 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         Thesis thesis = thesisRepository.findByProcessInstanceId(task.getProcessInstanceId())
                 .orElseThrow(() -> new ResourceNotFoundException(
                         "Thesis not found for process instance: " + task.getProcessInstanceId()));
-        Map<String, Object> vars = variables == null ? Map.of() : variables;
+        permissionGuard.require("TASKS_UPDATE",thesis.getPhaseId());
+        Map<String,Object> vars=new HashMap<>();
+        if (variables!=null) for (String key:List.of("content","attachmentUrl","approved","comment","defenseAt","room","councilName","notes")) {
+            if (variables.containsKey(key)) vars.put(key,variables.get(key));
+        }
         List<Map<String,Object>> step=jdbc.queryForList("SELECT ws.kind FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id WHERE wt.process_definition_id=? AND ws.step_key=?",task.getProcessDefinitionId(),task.getTaskDefinitionKey());
         if (!step.isEmpty()) {
             String kind=(String)step.getFirst().get("kind");
@@ -283,6 +292,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
                 jdbc.update("INSERT INTO thesis_submissions(id,thesis_id,step_key,submitted_by,content,attachment_url) VALUES(?,?,?,?,?,?)",
                     UUID.randomUUID().toString(),thesis.getId(),task.getTaskDefinitionKey(),actor.getId(),content,vars.get("attachmentUrl"));
             } else if (kind.equals("REVIEW")) {
+                permissionGuard.require("TASKS_APPROVE",thesis.getPhaseId());
                 if (!(vars.get("approved") instanceof Boolean approved)) throw new IllegalArgumentException("Cần chọn duyệt hoặc yêu cầu sửa");
                 String comment=String.valueOf(vars.getOrDefault("comment",""));
                 if (!approved && comment.isBlank()) throw new IllegalArgumentException("Cần ghi rõ nội dung yêu cầu sửa");
@@ -415,7 +425,11 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         Integer count=jdbc.queryForObject("SELECT count(*) FROM user_roles ur JOIN roles r ON r.id=ur.role_id WHERE ur.user_id=? AND r.role_code=? AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",Integer.class,userId,role,roundId);
         return count!=null && count>0;
     }
+    private String taskRound(Task task) {
+        return jdbc.queryForObject("SELECT phase_id FROM theses WHERE process_instance_id=?",String.class,task.getProcessInstanceId());
+    }
     private boolean canAccessTask(Task task,User actor) {
+        if (!permissionGuard.allowed("VIEW_TAC_VU_QUY_TRINH",taskRound(task))) return false;
         if ("ADMIN".equals(actor.getUserType())) return true;
         if (task.getAssignee()!=null) return task.getAssignee().equals(actor.getId());
         String roundId=jdbc.queryForObject("SELECT phase_id FROM theses WHERE process_instance_id=?",String.class,task.getProcessInstanceId());
@@ -472,6 +486,11 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
             var names = jdbc.queryForList("SELECT full_name FROM users WHERE id=?", String.class, task.getAssignee());
             if (!names.isEmpty()) response.setAssigneeName(names.getFirst());
         }
+        boolean write=permissionGuard.allowed("TASKS_UPDATE",taskRound(task));
+        User actor=currentUserService.getCurrentUser().orElseThrow();
+        response.setCanClaim(write && task.getAssignee()==null && canAccessTask(task,actor));
+        response.setCanComplete(write && actor.getId().equals(task.getAssignee())
+            && (!"REVIEW".equals(response.getKind()) || permissionGuard.allowed("TASKS_APPROVE",taskRound(task))));
         return response;
     }
 

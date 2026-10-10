@@ -62,7 +62,7 @@ public class MenuServiceImpl implements MenuService {
                 .orElseThrow(() -> new ApplicationException(ResponseDetails.NOT_FOUND));
 
         validateHierarchy(id, request.getParentId(), request.getPath());
-        if (Set.of("users","roles","permissions","menus","nguoi-dung-phan-quyen").contains(menu.getCode())
+        if (Set.of("users","roles","permissions","menus","nguoi-dung-phan-quyen","user-permissions").contains(menu.getCode())
             && (Boolean.FALSE.equals(request.getActive()) || !Objects.equals(menu.getParentId(),request.getParentId())
                 || !Objects.equals(menu.getPath(),request.getPath()))) throw invalid("Không được ẩn hoặc đổi đường dẫn/nhóm của menu quản trị cốt lõi");
         request.setPermissionCode(menu.getPermissionCode());
@@ -114,10 +114,7 @@ public class MenuServiceImpl implements MenuService {
         // A leaf node is visible if permissionCode is null/empty or in userPermissions
         // A parent node is visible if it has at least one visible child!
         List<MenuResponse> permitted = filterByPermissions(rootNodes, userPermissions);
-        String actor = users.findById(userId).orElseThrow().getUserType();
-        Set<String> governed = new HashSet<>(jdbc.queryForList("SELECT DISTINCT menu_code FROM menu_actor_visibility", String.class));
-        Set<String> visible = new HashSet<>(jdbc.queryForList("SELECT menu_code FROM menu_actor_visibility WHERE user_type=?", String.class, actor));
-        return permitted.stream().filter(root -> !governed.contains(root.getCode()) || visible.contains(root.getCode())).toList();
+        return permitted;
     }
 
     @Override
@@ -184,10 +181,11 @@ public class MenuServiceImpl implements MenuService {
         permission.setCode(code); permission.setName("Truy cập / Xem: " + label);
         permission.setModule("MENU"); permission.setMenuCode(menuCode); permission.setAction("VIEW"); permission.setEnabled(true);
         permissionRepository.save(permission);
-        var admin = roles.findByRoleCode("ADMIN").orElseThrow();
-        if (!allowed.existsByRoleIdAndPermissionId(admin.getId(),permission.getId())) {
-            var access = new com.example.graduationprocessbe.entity.RoleAllowedPermission();
-            access.setRoleId(admin.getId()); access.setPermissionId(permission.getId()); allowed.save(access);
+        for (var role : roles.findAll()) {
+            if (!allowed.existsByRoleIdAndPermissionId(role.getId(),permission.getId())) {
+                var access = new com.example.graduationprocessbe.entity.RoleAllowedPermission();
+                access.setRoleId(role.getId()); access.setPermissionId(permission.getId()); allowed.save(access);
+            }
         }
         return code;
     }

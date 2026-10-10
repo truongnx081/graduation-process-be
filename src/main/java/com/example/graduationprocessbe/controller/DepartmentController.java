@@ -7,6 +7,7 @@ import com.example.graduationprocessbe.dto.request.UpdateDepartmentRequest;
 import com.example.graduationprocessbe.dto.response.DepartmentResponse;
 import com.example.graduationprocessbe.service.DepartmentService;
 import jakarta.validation.Valid;
+import org.springframework.security.access.prepost.PreAuthorize;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.DeleteMapping;
@@ -23,12 +24,14 @@ import static com.example.graduationprocessbe.util.ApiResponses.ok;
 
 @RestController
 @RequestMapping("/api/departments")
+@PreAuthorize("hasAuthority('VIEW_KHOA_BO_MON')")
 @RequiredArgsConstructor
 public class DepartmentController {
 
     private final DepartmentService departmentService;
 
     @PostMapping
+    @PreAuthorize("hasAuthority('VIEW_KHOA_BO_MON') and hasAuthority('DEPARTMENTS_CREATE')")
     public ResponseEntity<ApiResponseWrapper<DepartmentResponse>> create(
             @RequestBody @Valid CreateDepartmentRequest request) {
         return ok(departmentService.create(request));
@@ -51,12 +54,14 @@ public class DepartmentController {
     }
 
     @PutMapping("/{id}")
+    @PreAuthorize("hasAuthority('VIEW_KHOA_BO_MON') and hasAuthority('DEPARTMENTS_UPDATE')")
     public ResponseEntity<ApiResponseWrapper<DepartmentResponse>> update(
             @PathVariable String id, @RequestBody @Valid UpdateDepartmentRequest request) {
         return ok(departmentService.update(id, request));
     }
 
     @DeleteMapping("/{id}")
+    @PreAuthorize("hasAuthority('VIEW_KHOA_BO_MON') and hasAuthority('DEPARTMENTS_DELETE')")
     public ResponseEntity<ApiResponseWrapper<Void>> delete(@PathVariable String id) {
         departmentService.delete(id);
         return ok(null);
