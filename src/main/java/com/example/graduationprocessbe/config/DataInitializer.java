@@ -25,8 +25,6 @@ public class DataInitializer implements ApplicationRunner {
     private String bootstrapPassword;
     @org.springframework.beans.factory.annotation.Value("${app.seed-demo:false}")
     private boolean seedDemo;
-    @org.springframework.beans.factory.annotation.Value("${app.seed-auth-demo:true}")
-    private boolean seedAuthDemo;
 
     private final UserRepository userRepository;
     private final RoleRepository roleRepository;
@@ -39,7 +37,7 @@ public class DataInitializer implements ApplicationRunner {
     @Override
     @Transactional
     public void run(ApplicationArguments args) throws Exception {
-        // One file contains the versioned baseline and forward-only upgrades.
+        // One file contains the baseline, permission migration, and demo seed data.
         // PostgreSQL executes the complete script in this transaction.
         String seed = new ClassPathResource("seed_rbac_and_menus.sql")
                 .getContentAsString(StandardCharsets.UTF_8);
@@ -51,8 +49,6 @@ public class DataInitializer implements ApplicationRunner {
                 bootstrapPassword == null || bootstrapPassword.isEmpty()
                         ? "" : passwordEncoder.encode(bootstrapPassword));
         jdbcTemplate.execute(seed);
-        jdbcTemplate.execute(new ClassPathResource("migrate_user_permissions.sql").getContentAsString(StandardCharsets.UTF_8));
-        if (seedAuthDemo) jdbcTemplate.execute(new ClassPathResource("seed_auth_demo.sql").getContentAsString(StandardCharsets.UTF_8));
         String baselineDefinition = jdbcTemplate.queryForObject(
                 "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
         if (baselineDefinition == null) workflowService.publish("core-template-v2");
