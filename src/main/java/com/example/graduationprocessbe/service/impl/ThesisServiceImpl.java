@@ -72,7 +72,11 @@ public class ThesisServiceImpl implements ThesisService {
             spec = spec.and((root, query, cb) -> cb.equal(root.get("lecturer").get("id"), lecturerId));
         }
         if (status != null && !status.isBlank()) {
-            spec = spec.and((root, query, cb) -> cb.equal(root.get("currentStatus"), status));
+            // "a,b" = any of them; "!a,b" = none of them.
+            boolean negate = status.startsWith("!");
+            List<String> statuses = java.util.Arrays.stream((negate ? status.substring(1) : status).split(","))
+                    .map(String::trim).filter(item -> !item.isEmpty()).toList();
+            spec = spec.and((root, query, cb) -> negate ? cb.not(root.get("currentStatus").in(statuses)) : root.get("currentStatus").in(statuses));
         }
         if (phaseId != null && !phaseId.isBlank()) {
             spec = spec.and((root, query, cb) -> cb.equal(root.get("phaseId"), phaseId));
@@ -88,6 +92,11 @@ public class ThesisServiceImpl implements ThesisService {
         Thesis thesis = find(id);
         permissionGuard.require("THESIS_UPDATE", thesis.getPhaseId());
         requireManagement(thesis);
+        boolean proposalApproved = thesis.getProcessInstanceId() != null && !java.util.List.of("submitProposal", "reviewProposal", "reviseProposal",
+                "advisorSignature", "submitSignedProposal", "facultyFinalApproval").contains(thesis.getCurrentStatus());
+        if (proposalApproved && (request.getTitle() != null && !request.getTitle().equals(thesis.getTitle())
+                || request.getTitleEn() != null || request.getDescription() != null))
+            throw new IllegalArgumentException("Đề cương đã được duyệt, chỉ được xem, không thể chỉnh sửa");
         if (request.getTitle() != null) {
             thesis.setTitle(request.getTitle());
         }

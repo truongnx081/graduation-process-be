@@ -60,8 +60,7 @@ public class ThesisController {
 
     public record GuidanceDecision(@jakarta.validation.constraints.NotNull Boolean approved,
                                    @jakarta.validation.constraints.Size(max = 2000) String comment) {}
-    public record RegistrationRetry(@jakarta.validation.constraints.NotBlank @jakarta.validation.constraints.Size(max = 255) String title,
-                                    @jakarta.validation.constraints.NotBlank String lecturerId) {}
+
 
     @PostMapping("/{id}/guidance-confirmation")
     public ResponseEntity<ApiResponseWrapper<ThesisResponse>> confirmGuidance(
@@ -71,8 +70,8 @@ public class ThesisController {
 
     @PostMapping("/{id}/registration-retry")
     public ResponseEntity<ApiResponseWrapper<ThesisResponse>> retryRegistration(
-            @PathVariable String id, @Valid @RequestBody RegistrationRetry request) {
-        return ok(thesisProcessService.resubmitRegistration(id, request.title(), request.lecturerId()));
+            @PathVariable String id) {
+        return ok(thesisProcessService.resubmitRegistration(id));
     }
 
     /** GET /api/theses?keyword=&studentId=&lecturerId=&status=&phaseId=&page=1&size=10&sortBy=createdDate&direction=desc */
@@ -185,7 +184,7 @@ public class ThesisController {
     @GetMapping("/{id}/submissions")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> submissions(@PathVariable String id) {
         String processId = thesisProcessService.getThesis(id).getProcessInstanceId();
-        var rows = jdbc.queryForList("SELECT s.id,s.step_key,s.content,s.explanation,s.signature,s.signature2,s.attachment_url,s.submitted_at,u.full_name AS submitted_by FROM thesis_submissions s JOIN users u ON u.id=s.submitted_by WHERE s.thesis_id=? ORDER BY s.submitted_at",id);
+        var rows = jdbc.queryForList("SELECT s.id,s.step_key,s.content,s.explanation,s.signature,s.signature2,s.attachment_url,s.submitted_at,s.submitted_by AS submitted_by_id,u.full_name AS submitted_by FROM thesis_submissions s JOIN users u ON u.id=s.submitted_by WHERE s.thesis_id=? ORDER BY s.submitted_at",id);
         rows.forEach(row -> row.put("step_name", presentation.stepLabel(processId, (String)row.get("step_key"))));
         return ok(rows);
     }
@@ -208,7 +207,7 @@ public class ThesisController {
     @GetMapping("/{id}/feedback")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> feedback(@PathVariable String id) {
         String processId = thesisProcessService.getThesis(id).getProcessInstanceId();
-        var rows = jdbc.queryForList("SELECT f.id,f.step_key,f.approved,f.comment,f.signature,f.reviewed_at,u.full_name AS reviewer FROM thesis_feedback f JOIN users u ON u.id=f.reviewer_id WHERE f.thesis_id=? ORDER BY f.reviewed_at",id);
+        var rows = jdbc.queryForList("SELECT f.id,f.step_key,f.approved,f.comment,f.signature,f.reviewed_at,f.reviewer_id,u.full_name AS reviewer FROM thesis_feedback f JOIN users u ON u.id=f.reviewer_id WHERE f.thesis_id=? ORDER BY f.reviewed_at",id);
         rows.forEach(row -> row.put("step_name", presentation.stepLabel(processId, (String)row.get("step_key"))));
         return ok(rows);
     }

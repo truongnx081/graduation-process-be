@@ -212,7 +212,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
 
     @Override
     @Transactional
-    public ThesisResponse resubmitRegistration(String thesisId, String title, String lecturerId) {
+    public ThesisResponse resubmitRegistration(String thesisId) {
         permissionGuard.require("TASKS_UPDATE",findThesis(thesisId).getPhaseId());
         jdbc.queryForObject("SELECT id FROM theses WHERE id=? FOR UPDATE", String.class, thesisId);
         Thesis thesis = findThesis(thesisId);
@@ -223,15 +223,13 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
                 .processInstanceId(thesis.getProcessInstanceId()).taskDefinitionKey("registerThesis").singleResult();
         if (task==null) throw new IllegalArgumentException("Hồ sơ hiện không chờ gửi lại đăng ký");
         if (task.getAssignee()==null) taskService.claim(task.getId(),actor.getId());
-        if (title == null || title.isBlank() || title.trim().length() > 255)
-            throw new IllegalArgumentException("Tên đề tài không hợp lệ");
         checkStepWindow(thesis.getPhaseId(),"registerThesis");
-        User lecturer = findUser(lecturerId);
+        // The student only confirms: title and supervisor stay as already approved.
+        User lecturer = thesis.getLecturer();
+        String lecturerId = lecturer.getId();
         Integer available = jdbc.queryForObject("SELECT count(*) FROM round_lecturers WHERE round_id=? AND lecturer_id=? AND active=true", Integer.class, thesis.getPhaseId(), lecturerId);
         if (!"LECTURER".equals(lecturer.getUserType()) || !"ACTIVE".equals(lecturer.getStatus()) || available == null || available == 0)
             throw new IllegalArgumentException("Giảng viên chưa tham gia đợt này hoặc đã ngừng hoạt động");
-        thesis.setTitle(title.trim());
-        thesis.setLecturer(lecturer);
         thesis.setGuidanceApproved(null);
         thesis.setGuidanceRespondedAt(null);
         thesis.setGuidanceComment(null);
@@ -356,7 +354,7 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         if (variables!=null) for (String key:List.of("content","attachmentUrl","title","titleEn","explanation","signature","approved","comment","defenseAt","room","councilName","notes")) {
             if (variables.containsKey(key)) vars.put(key,variables.get(key));
         }
-        List<Map<String,Object>> step=jdbc.queryForList("SELECT ws.kind FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id WHERE wt.process_definition_id=? AND ws.step_key=?",task.getProcessDefinitionId(),task.getTaskDefinitionKey());
+        List<Map<String,Object>> step=jdbc.queryForList(    "SELECT ws.kind FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id WHERE wt.process_definition_id=? AND ws.step_key=?",task.getProcessDefinitionId(),task.getTaskDefinitionKey());
         if (!step.isEmpty()) {
             String kind=(String)step.getFirst().get("kind");
             if (kind.equals("SUBMIT")) {

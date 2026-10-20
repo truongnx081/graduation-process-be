@@ -770,7 +770,7 @@ BEGIN
     SELECT array_agg(code) INTO removed_codes FROM menus WHERE code NOT IN (
         'tong-quan','tim-giang-vien-de-tai','ds-giang-vien',
         'do-an-cua-toi','dang-ky-de-tai','tien-trinh-do-an','do-an-da-thuc-hien','nop-bao-cao',
-        'ho-so-de-tai-giang-vien','ho-so-giang-vien','huong-dan-do-an','sinh-vien-huong-dan','ho-so-cho-duyet',
+        'ho-so-de-tai-giang-vien','ho-so-giang-vien','huong-dan-do-an','ho-so-cho-duyet',
         'dot-do-an','nam-hoc','hoc-ky','ds-dot-do-an',
         'ho-so-tien-do','ds-ho-so-tien-do','duyet-de-cuong','trung-lap',
         'cau-hinh-quy-trinh','bao-cao-thong-ke','bao-cao-tien-do','theo-doi-tre-han',
@@ -817,7 +817,7 @@ BEGIN
     ON CONFLICT (code) DO UPDATE SET parent_id=EXCLUDED.parent_id, label=EXCLUDED.label, icon=EXCLUDED.icon,
         path=EXCLUDED.path, sort_order=EXCLUDED.sort_order, permission_code=EXCLUDED.permission_code, active=true, last_modified_date=now();
     UPDATE menus SET label='Giảng viên hướng dẫn' WHERE code='ho-so-de-tai-giang-vien';
-    UPDATE menus SET label='Công việc GVHD' WHERE code='ho-so-cho-duyet';
+    UPDATE menus SET label='Đề tài hướng dẫn' WHERE code='ho-so-cho-duyet';
     UPDATE menus SET label='Duyệt hồ sơ Khoa' WHERE code='ho-so-tien-do';
     UPDATE menus SET label='Hàng chờ duyệt' WHERE code='duyet-de-cuong';
     UPDATE menus SET label='Theo dõi hồ sơ' WHERE code='ds-ho-so-tien-do';
@@ -1063,12 +1063,12 @@ BEGIN
       SELECT gen_random_uuid()::text,'core-template-v2',v.step_key,v.label,v.sort_order,v.kind,v.assignee_role,v.due_days,v.next_key,v.reject_key
       FROM (VALUES
         ('submitProposal','Sinh viên nộp đề cương',1,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
-        ('reviewProposal','Khoa kiểm tra và phản hồi đề cương',2,'REVIEW','FACULTY_STAFF',5,'advisorSignature'::varchar,'reviseProposal'),
+        ('reviewProposal','Khoa kiểm tra và phản hồi đề cương',2,'REVIEW','FACULTY_STAFF',5,'reviseProposal'::varchar,'reviseProposal'),
         ('reviseProposal','Sinh viên hoàn thiện đề cương theo phản hồi',3,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
         ('advisorSignature','Giảng viên xác nhận đề cương',4,'REVIEW','LECTURER',5,NULL::varchar,'reviseProposal'),
         ('submitSignedProposal','Sinh viên nộp đề cương đã xác nhận',5,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
         ('facultyFinalApproval','Khoa duyệt đề cương chính thức',6,'REVIEW','FACULTY_STAFF',5,NULL::varchar,'reviseProposal'),
-        ('registerThesis','Sinh viên xác nhận đăng ký ĐATN',7,'TASK','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
+        ('registerThesis','Sinh viên xác nhận đăng ký giảng viên hướng dẫn',7,'TASK','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
         ('confirmGuidance','Giảng viên xác nhận hướng dẫn ĐATN',8,'REVIEW','LECTURER',5,NULL::varchar,'registerThesis'),
         ('midtermReport','Sinh viên nộp báo cáo giữa kỳ',9,'SUBMIT','STUDENT',NULL::integer,NULL::varchar,NULL::varchar),
         ('reviewMidterm','Giảng viên phản hồi báo cáo giữa kỳ',10,'REVIEW','LECTURER',5,NULL::varchar,'midtermReport'),
@@ -1479,6 +1479,7 @@ BEGIN
     VALUES(gen_random_uuid()::text,'VIEW_DUYET_DE_CUONG_GVHD','Truy cập / Xem: Duyệt đề cương (GVHD)',
         'MENU','duyet-de-cuong-gvhd','VIEW',true,now(),now()) ON CONFLICT(code) DO NOTHING;
     UPDATE menus SET permission_code='VIEW_DUYET_DE_CUONG_GVHD' WHERE code='duyet-de-cuong-gvhd';
+    UPDATE menus SET label='Thẩm định đề cương', sort_order=62 WHERE code='duyet-de-cuong-gvhd';
     INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
     SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
     WHERE p.code='VIEW_DUYET_DE_CUONG_GVHD' AND r.role_code IN ('ADMIN','LECTURER')
@@ -1572,3 +1573,38 @@ BEGIN
     ALTER TABLE thesis_submissions ADD COLUMN IF NOT EXISTS signature2 text;
     INSERT INTO app_seed_versions(version) VALUES('submission-signature2-v1');
 END $submission_signature2_v1$;
+
+-- Lecturer screen for the "confirm guidance" step (table of groups waiting for the supervisor's answer).
+DO $lecturer_guidance_menu_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261020,1);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='lecturer-guidance-menu-v1') THEN RETURN; END IF;
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'xac-nhan-huong-dan','Xác nhận hướng dẫn','CheckSquareOutlined','/lecturer/advising/guidance',
+        (SELECT id FROM menus WHERE code='huong-dan-do-an'),63,true,now(),now()) ON CONFLICT(code) DO NOTHING;
+    INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'VIEW_XAC_NHAN_HUONG_DAN','Truy cập / Xem: Xác nhận hướng dẫn',
+        'MENU','xac-nhan-huong-dan','VIEW',true,now(),now()) ON CONFLICT(code) DO NOTHING;
+    UPDATE menus SET permission_code='VIEW_XAC_NHAN_HUONG_DAN' WHERE code='xac-nhan-huong-dan';
+    UPDATE menus SET sort_order=64 WHERE code='ho-so-cho-duyet';
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE p.code='VIEW_XAC_NHAN_HUONG_DAN' AND r.role_code IN ('ADMIN','LECTURER')
+    ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE p.code='VIEW_XAC_NHAN_HUONG_DAN' AND r.role_code IN ('ADMIN','LECTURER')
+    ON CONFLICT(role_id,permission_id) DO NOTHING;
+    UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code IN ('ADMIN','LECTURER');
+    INSERT INTO app_seed_versions(version) VALUES('lecturer-guidance-menu-v1');
+END $lecturer_guidance_menu_v1$;
+
+-- Report submission now happens inside "Đồ án đang thực hiện", so the separate student menu is retired.
+DO $retire_submit_menu_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261020,2);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='retire-submit-menu-v1') THEN RETURN; END IF;
+    DELETE FROM menus WHERE code='nop-bao-cao';
+    UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code='STUDENT';
+    INSERT INTO app_seed_versions(version) VALUES('retire-submit-menu-v1');
+END $retire_submit_menu_v1$;

@@ -15,7 +15,7 @@ public interface ThesisProcessService {
     ThesisResponse submitProposal(String thesisId, String content);
     ThesisResponse confirmGuidance(String thesisId, boolean approved, String comment);
 
-    ThesisResponse resubmitRegistration(String thesisId, String title, String lecturerId);
+    ThesisResponse resubmitRegistration(String thesisId);
 
     ThesisResponse getThesis(String thesisId);
 

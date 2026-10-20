@@ -288,7 +288,6 @@ public class CoreWorkflowService {
             if ("REVIEW".equals(step.get("kind"))) {
                 String rejected = (String)step.get("reject_key");
                 if (rejected==null || rejected.isBlank()) throw new IllegalArgumentException("Bước duyệt thiếu nhánh yêu cầu sửa: "+key);
-                if (rejected.equals(next)) throw new IllegalArgumentException("Hai nhánh duyệt không được trỏ tới cùng một bước: "+key);
                 queue.add(rejected);
             }
         }
