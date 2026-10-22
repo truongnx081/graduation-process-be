@@ -1,7 +1,9 @@
 package com.example.graduationprocessbe.controller;
 
 import com.example.graduationprocessbe.dto.ApiResponseWrapper;
+import com.example.graduationprocessbe.entity.User;
 import com.example.graduationprocessbe.service.CoreWorkflowService;
+import com.example.graduationprocessbe.service.CurrentUserService;
 import com.example.graduationprocessbe.service.RoundMailManagementService;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.ResponseEntity;
@@ -9,6 +11,7 @@ import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.web.bind.annotation.*;
 
 import java.time.OffsetDateTime;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 
@@ -20,17 +23,27 @@ import static com.example.graduationprocessbe.util.ApiResponses.ok;
 public class CoreWorkflowController {
     private final CoreWorkflowService core;
     private final RoundMailManagementService roundMail;
+    private final CurrentUserService currentUser;
 
-    public record YearInput(String code,int startYear) {}
-    public record SemesterInput(String academicYearId,int number) {}
+    public record YearInput(String code,int startYear,LocalDate startsOn,LocalDate endsOn) {}
+    public record SemesterInput(String academicYearId,int number,LocalDate startsOn,LocalDate endsOn) {}
     public record RoundInput(String code,String name,String semesterId,Boolean active,
                              OffsetDateTime registrationOpensAt,OffsetDateTime registrationClosesAt) {}
     public record LecturerInput(String lecturerId,String orientation) {}
     public record DraftInput(String name,String sourceId) {}
     public record TemplateInput(String templateId) {}
     public record WindowInput(String stepKey,OffsetDateTime opensAt,OffsetDateTime closesAt) {}
+    public record RecipientStudentsInput(List<String> userIds) {}
+
+    @GetMapping("/rounds/{id}/notification-students") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_CREATE', #id)")
+    public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> recipientStudents(@PathVariable String id) {
+        return ok(roundMail.recipientStudents(id));
+    }
+    @PutMapping("/rounds/{id}/notification-students") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_CREATE', #id)")
+    public ResponseEntity<ApiResponseWrapper<Void>> saveRecipientStudents(@PathVariable String id,@RequestBody RecipientStudentsInput input) {
+        roundMail.saveRecipientStudents(id,input.userIds()); return ok(null);
+    }
     public record MailSettingsInput(int remindBeforeHours,int remindAfterHours) {}
-    public record CampaignInput(String subject,String message,OffsetDateTime scheduledAt) {}
 
     @GetMapping("/rounds/{id}/mail-settings") @PreAuthorize("@permissionGuard.allowed('VIEW_MOC_NOP_THONG_BAO', #id)")
     public ResponseEntity<ApiResponseWrapper<Map<String,Object>>> mailSettings(@PathVariable String id) { return ok(roundMail.settings(id)); }
@@ -41,8 +54,21 @@ public class CoreWorkflowController {
     @GetMapping("/rounds/{id}/mail-campaigns") @PreAuthorize("@permissionGuard.allowed('VIEW_MOC_NOP_THONG_BAO', #id)")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> mailCampaigns(@PathVariable String id) { return ok(roundMail.campaigns(id)); }
     @PostMapping("/rounds/{id}/mail-campaigns") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_CREATE', #id)")
-    public ResponseEntity<ApiResponseWrapper<String>> scheduleMail(@PathVariable String id,@RequestBody CampaignInput input) {
-        return ok(roundMail.schedule(id,input.subject(),input.message(),input.scheduledAt()));
+    public ResponseEntity<ApiResponseWrapper<String>> scheduleMail(@PathVariable String id,@RequestBody RoundMailManagementService.CampaignRequest input) {
+        String createdBy=currentUser.getCurrentUser().map(User::getId).orElse(null);
+        return ok(roundMail.schedule(id,input,createdBy));
+    }
+    @PostMapping("/rounds/{id}/mail-preview") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_CREATE', #id)")
+    public ResponseEntity<ApiResponseWrapper<Map<String,Object>>> previewMail(@PathVariable String id,@RequestBody RoundMailManagementService.CampaignRequest input) {
+        return ok(roundMail.preview(id,input));
+    }
+    @PutMapping("/rounds/{id}/reminders/{stepKey}") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_UPDATE', #id)")
+    public ResponseEntity<ApiResponseWrapper<Void>> saveReminder(@PathVariable String id,@PathVariable String stepKey,@RequestBody RoundMailManagementService.ReminderInput input) {
+        roundMail.saveReminder(id,stepKey,input); return ok(null);
+    }
+    @PostMapping("/rounds/{id}/mail-campaigns/{campaignId}/cancel") @PreAuthorize("@permissionGuard.allowed('SCHEDULE_UPDATE', #id)")
+    public ResponseEntity<ApiResponseWrapper<Void>> cancelMail(@PathVariable String id,@PathVariable String campaignId) {
+        roundMail.cancel(id,campaignId); return ok(null);
     }
     @GetMapping("/rounds/{id}/mail-deliveries") @PreAuthorize("@permissionGuard.allowed('VIEW_MOC_NOP_THONG_BAO', #id)")
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> mailDeliveries(@PathVariable String id) { return ok(roundMail.deliveries(id)); }
@@ -65,16 +91,16 @@ public class CoreWorkflowController {
     public ResponseEntity<ApiResponseWrapper<List<Map<String,Object>>>> steps(@PathVariable String id) { return ok(core.steps(id)); }
 
     @PostMapping("/years") @PreAuthorize("@permissionGuard.allowed('CALENDAR_CREATE', null)")
-    public ResponseEntity<ApiResponseWrapper<Void>> year(@RequestBody YearInput input) { core.createYear(input.code(),input.startYear()); return ok(null); }
+    public ResponseEntity<ApiResponseWrapper<Void>> year(@RequestBody YearInput input) { core.createYear(input.code(),input.startYear(),input.startsOn(),input.endsOn()); return ok(null); }
     @PostMapping("/semesters") @PreAuthorize("@permissionGuard.allowed('CALENDAR_CREATE', null)")
-    public ResponseEntity<ApiResponseWrapper<Void>> semester(@RequestBody SemesterInput input) { core.createSemester(input.academicYearId(),input.number()); return ok(null); }
+    public ResponseEntity<ApiResponseWrapper<Void>> semester(@RequestBody SemesterInput input) { core.createSemester(input.academicYearId(),input.number(),input.startsOn(),input.endsOn()); return ok(null); }
     @PutMapping("/years/{id}") @PreAuthorize("@permissionGuard.allowed('CALENDAR_UPDATE', null)")
     public ResponseEntity<ApiResponseWrapper<Void>> updateYear(@PathVariable String id,@RequestBody YearInput input) {
-        core.updateYear(id,input.code(),input.startYear()); return ok(null);
+        core.updateYear(id,input.code(),input.startYear(),input.startsOn(),input.endsOn()); return ok(null);
     }
     @PutMapping("/semesters/{id}") @PreAuthorize("@permissionGuard.allowed('CALENDAR_UPDATE', null)")
     public ResponseEntity<ApiResponseWrapper<Void>> updateSemester(@PathVariable String id,@RequestBody SemesterInput input) {
-        core.updateSemester(id,input.academicYearId(),input.number()); return ok(null);
+        core.updateSemester(id,input.academicYearId(),input.number(),input.startsOn(),input.endsOn()); return ok(null);
     }
     @PostMapping("/rounds") @PreAuthorize("@permissionGuard.allowed('ROUNDS_CREATE', null)")
     public ResponseEntity<ApiResponseWrapper<Void>> round(@RequestBody RoundInput input) {

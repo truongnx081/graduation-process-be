@@ -7,12 +7,17 @@ import com.example.graduationprocessbe.dto.response.PageResponse;
 import com.example.graduationprocessbe.dto.response.UserResponse;
 import com.example.graduationprocessbe.exception.ResponseDetails;
 import com.example.graduationprocessbe.service.RbacSetupService;
+import com.example.graduationprocessbe.service.UserImportService;
 import com.example.graduationprocessbe.service.UserService;
 import com.example.graduationprocessbe.util.PaginationUtils;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.security.access.prepost.PreAuthorize;
+import org.springframework.http.ContentDisposition;
+import org.springframework.http.HttpHeaders;
+import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.multipart.MultipartFile;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -31,6 +36,7 @@ public class UserController {
 
     private final UserService userService;
     private final RbacSetupService rbacSetupService;
+    private final UserImportService userImportService;
 
     @GetMapping
     @PreAuthorize("hasAuthority('VIEW_USERS')")
@@ -70,6 +76,24 @@ public class UserController {
                 .body(new ApiResponseWrapper<>(
                         ResponseDetails.API_SUCCESSFULLY,
                         userService.createUser(request)));
+    }
+
+    @GetMapping("/import/template")
+    @PreAuthorize("hasAuthority('VIEW_USERS') and hasAuthority('USERS_CREATE')")
+    public ResponseEntity<byte[]> importTemplate() {
+        return ResponseEntity.ok()
+                .header(HttpHeaders.CONTENT_DISPOSITION, ContentDisposition.attachment().filename("mau-nhap-tai-khoan.xlsx").build().toString())
+                .contentType(MediaType.parseMediaType("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"))
+                .body(userImportService.template());
+    }
+
+    /** dryRun=true only validates and returns per-row results; dryRun=false creates the valid rows. */
+    @PostMapping(value = "/import", consumes = MediaType.MULTIPART_FORM_DATA_VALUE)
+    @PreAuthorize("hasAuthority('VIEW_USERS') and hasAuthority('USERS_CREATE')")
+    public ApiResponseWrapper<UserImportService.ImportResult> importUsers(
+            @RequestParam("file") MultipartFile file,
+            @RequestParam(defaultValue = "true") boolean dryRun) {
+        return new ApiResponseWrapper<>(ResponseDetails.API_SUCCESSFULLY, userImportService.importUsers(file, dryRun));
     }
 
     @org.springframework.web.bind.annotation.PutMapping("/{userId}")

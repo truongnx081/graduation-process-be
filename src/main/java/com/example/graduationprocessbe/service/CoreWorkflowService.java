@@ -9,6 +9,7 @@ import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
 import java.time.OffsetDateTime;
+import java.time.LocalDate;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -25,36 +26,92 @@ public class CoreWorkflowService {
         return jdbc.queryForList("SELECT * FROM academic_years ORDER BY start_year DESC");
     }
     @Transactional
-    public void createYear(String code, int startYear) {
+    public void createYear(String code, int startYear, LocalDate startsOn, LocalDate endsOn) {
         if (code == null || startYear < 2020 || startYear > 2100 || !code.equals(startYear + "-" + (startYear + 1))) throw new IllegalArgumentException("Mã năm học không hợp lệ");
-        jdbc.update("INSERT INTO academic_years(id,code,start_year,end_year) VALUES(?,?,?,?)",
-                UUID.randomUUID().toString(), code, startYear, startYear + 1);
+        validateYearDates(startYear, startsOn, endsOn);
+        validateYearOverlap(null, startsOn, endsOn);
+        jdbc.update("INSERT INTO academic_years(id,code,start_year,end_year,starts_on,ends_on) VALUES(?,?,?,?,?,?)",
+                UUID.randomUUID().toString(), code, startYear, startYear + 1, startsOn, endsOn);
     }
     public List<Map<String,Object>> semesters() {
         return jdbc.queryForList("SELECT s.*,y.code AS academic_year_code FROM semesters s JOIN academic_years y ON y.id=s.academic_year_id ORDER BY y.start_year DESC,s.number");
     }
     @Transactional
-    public void createSemester(String yearId, int number) {
+    public void createSemester(String yearId, int number, LocalDate startsOn, LocalDate endsOn) {
         if (number < 1 || number > 3) throw new IllegalArgumentException("Học kỳ phải từ 1 đến 3");
-        jdbc.update("INSERT INTO semesters(id,academic_year_id,number) VALUES(?,?,?)",
-                UUID.randomUUID().toString(), yearId, number);
+        validateSemesterDates(yearId, null, startsOn, endsOn);
+        jdbc.update("INSERT INTO semesters(id,academic_year_id,number,starts_on,ends_on) VALUES(?,?,?,?,?)",
+                UUID.randomUUID().toString(), yearId, number, startsOn, endsOn);
     }
     @Transactional
-    public void updateYear(String id, String code, int startYear) {
+    public void updateYear(String id, String code, int startYear, LocalDate startsOn, LocalDate endsOn) {
         if (code == null || startYear < 2020 || startYear > 2100 || !code.equals(startYear + "-" + (startYear + 1)))
             throw new IllegalArgumentException("Mã năm học không hợp lệ");
-        if (jdbc.update("UPDATE academic_years SET code=?,start_year=?,end_year=? WHERE id=?", code,startYear,startYear+1,id) == 0)
+        validateYearDates(startYear, startsOn, endsOn);
+        validateYearOverlap(id, startsOn, endsOn);
+        var semesters = jdbc.queryForList("SELECT starts_on,ends_on FROM semesters WHERE academic_year_id=? FOR UPDATE", id);
+        for (var semester : semesters) {
+            LocalDate first = asDate(semester.get("starts_on"));
+            LocalDate last = asDate(semester.get("ends_on"));
+            if (first != null && last != null && (first.isBefore(startsOn) || last.isAfter(endsOn)))
+                throw new IllegalArgumentException("Thời gian năm học phải bao gồm tất cả học kỳ hiện có");
+        }
+        if (jdbc.update("UPDATE academic_years SET code=?,start_year=?,end_year=?,starts_on=?,ends_on=? WHERE id=?", code,startYear,startYear+1,startsOn,endsOn,id) == 0)
             throw new IllegalArgumentException("Không tìm thấy năm học");
     }
     @Transactional
-    public void updateSemester(String id, String yearId, int number) {
+    public void updateSemester(String id, String yearId, int number, LocalDate startsOn, LocalDate endsOn) {
         if (number < 1 || number > 3) throw new IllegalArgumentException("Học kỳ phải từ 1 đến 3");
+        validateSemesterDates(yearId, id, startsOn, endsOn);
+        for (var range : jdbc.queryForList("SELECT registration_opens_at AS opens_at,registration_closes_at AS closes_at FROM thesis_rounds WHERE semester_id=? " +
+                "UNION ALL SELECT w.opens_at,w.closes_at FROM round_step_windows w JOIN thesis_rounds r ON r.id=w.round_id WHERE r.semester_id=?",id,id)) {
+            CalendarDateRange.validate(RoundReminderService.asOffset(range.get("opens_at")),RoundReminderService.asOffset(range.get("closes_at")),
+                    startsOn,endsOn,"Học kỳ phải bao gồm thời gian đăng ký và các mốc của đợt hiện có");
+        }
         // Keep the academic year and every referencing round stable during an edit.
-        if (jdbc.update("UPDATE semesters SET number=? WHERE id=? AND academic_year_id=?", number,id,yearId) == 0)
+        if (jdbc.update("UPDATE semesters SET number=?,starts_on=?,ends_on=? WHERE id=? AND academic_year_id=?", number,startsOn,endsOn,id,yearId) == 0)
             throw new IllegalArgumentException("Không tìm thấy học kỳ thuộc năm học đã chọn");
     }
+    private LocalDate asDate(Object value) {
+        if (value instanceof LocalDate date) return date;
+        if (value instanceof java.sql.Date date) return date.toLocalDate();
+        return value == null ? null : LocalDate.parse(value.toString());
+    }
+    private void validateYearDates(int startYear, LocalDate startsOn, LocalDate endsOn) {
+        if (startsOn == null || endsOn == null || !startsOn.isBefore(endsOn)
+                || startsOn.getYear() != startYear || endsOn.getYear() != startYear + 1)
+            throw new IllegalArgumentException("Thời gian năm học phải bắt đầu trong năm đầu, kết thúc trong năm kế tiếp và ngày bắt đầu trước ngày kết thúc");
+    }
+    private void validateYearOverlap(String editedId, LocalDate startsOn, LocalDate endsOn) {
+        var existing = jdbc.queryForList("SELECT id,starts_on,ends_on FROM academic_years FOR UPDATE");
+        for (var year : existing) {
+            if (year.get("id").equals(editedId)) continue;
+            LocalDate first = asDate(year.get("starts_on"));
+            LocalDate last = asDate(year.get("ends_on"));
+            if (first != null && last != null && !endsOn.isBefore(first) && !startsOn.isAfter(last))
+                throw new IllegalArgumentException("Thời gian năm học chồng chéo với năm học khác");
+        }
+    }
+    private void validateSemesterDates(String yearId, String editedId, LocalDate startsOn, LocalDate endsOn) {
+        if (startsOn == null || endsOn == null || !startsOn.isBefore(endsOn))
+            throw new IllegalArgumentException("Ngày bắt đầu học kỳ phải trước ngày kết thúc");
+        var years = jdbc.queryForList("SELECT starts_on,ends_on FROM academic_years WHERE id=? FOR UPDATE", yearId);
+        if (years.isEmpty()) throw new IllegalArgumentException("Không tìm thấy năm học");
+        LocalDate yearStart = asDate(years.getFirst().get("starts_on"));
+        LocalDate yearEnd = asDate(years.getFirst().get("ends_on"));
+        if (yearStart == null || yearEnd == null || startsOn.isBefore(yearStart) || endsOn.isAfter(yearEnd))
+            throw new IllegalArgumentException("Thời gian học kỳ phải nằm trong thời gian năm học");
+        var existing = jdbc.queryForList("SELECT id,starts_on,ends_on FROM semesters WHERE academic_year_id=? FOR UPDATE", yearId);
+        for (var semester : existing) {
+            if (semester.get("id").equals(editedId)) continue;
+            LocalDate first = asDate(semester.get("starts_on"));
+            LocalDate last = asDate(semester.get("ends_on"));
+            if (first != null && last != null && !endsOn.isBefore(first) && !startsOn.isAfter(last))
+                throw new IllegalArgumentException("Thời gian học kỳ chồng chéo với học kỳ khác trong năm học");
+        }
+    }
     public List<Map<String,Object>> rounds() {
-        return jdbc.queryForList("SELECT r.id,r.code,r.name,r.active,r.semester_id,r.registration_opens_at,r.registration_closes_at,r.workflow_definition_id,s.number AS semester_number,y.code AS academic_year_code FROM thesis_rounds r LEFT JOIN semesters s ON s.id=r.semester_id LEFT JOIN academic_years y ON y.id=s.academic_year_id ORDER BY y.start_year DESC,s.number,r.code");
+        return jdbc.queryForList("SELECT r.id,r.code,r.name,r.active,r.semester_id,r.registration_opens_at,r.registration_closes_at,r.workflow_definition_id,s.number AS semester_number,s.starts_on AS semester_starts_on,s.ends_on AS semester_ends_on,y.code AS academic_year_code FROM thesis_rounds r LEFT JOIN semesters s ON s.id=r.semester_id LEFT JOIN academic_years y ON y.id=s.academic_year_id ORDER BY y.start_year DESC,s.number,r.code");
     }
     public List<Map<String,Object>> overdueTasks() {
         var actor=currentUserService.getCurrentUser().orElseThrow();
@@ -78,8 +135,10 @@ public class CoreWorkflowService {
     public void setWindow(String roundId,String stepKey,OffsetDateTime opens,OffsetDateTime closes) {
         if (stepKey==null || opens==null || closes==null || !opens.isBefore(closes))
             throw new IllegalArgumentException("Mốc mở/đóng bước không hợp lệ");
-        Integer valid=jdbc.queryForObject("SELECT count(*) FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id JOIN workflow_steps ws ON ws.template_id=wt.id WHERE r.id=? AND ws.step_key=? AND (ws.kind='SUBMIT' OR ws.step_key='registerThesis')",Integer.class,roundId,stepKey);
-        if (valid==null || valid==0) throw new IllegalArgumentException("Bước nộp không thuộc quy trình của đợt");
+        Integer valid=jdbc.queryForObject("SELECT count(*) FROM thesis_rounds r JOIN workflow_templates wt ON wt.process_definition_id=r.workflow_definition_id JOIN workflow_steps ws ON ws.template_id=wt.id WHERE r.id=? AND ws.step_key=?",Integer.class,roundId,stepKey);
+        if (valid==null || valid==0) throw new IllegalArgumentException("Bước thực hiện không thuộc quy trình của đợt");
+        String semesterId=jdbc.queryForObject("SELECT semester_id FROM thesis_rounds WHERE id=?",String.class,roundId);
+        validateWithinSemester(semesterId,opens,closes,"Mốc thời gian phải nằm trong học kỳ của đợt");
         jdbc.update("INSERT INTO round_step_windows(id,round_id,step_key,opens_at,closes_at) VALUES(?,?,?,?,?) ON CONFLICT(round_id,step_key) DO UPDATE SET opens_at=EXCLUDED.opens_at,closes_at=EXCLUDED.closes_at",
                 UUID.randomUUID().toString(),roundId,stepKey,opens,closes);
     }
@@ -92,6 +151,7 @@ public class CoreWorkflowService {
         validateRound(code,name,semesterId);
         validateDates(opens,closes);
         requireAvailableSemester(semesterId, null);
+        validateWithinSemester(semesterId,opens,closes,"Thời gian đăng ký đợt phải nằm trong học kỳ đã chọn");
         if (Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM thesis_rounds WHERE code=?)", Boolean.class, code)))
             throw new IllegalArgumentException("Mã đợt ĐATN đã tồn tại");
         jdbc.update("INSERT INTO thesis_rounds(id,code,name,active,semester_id,registration_opens_at,registration_closes_at,created_date,last_modified_date) VALUES(?,?,?,?,?,?,?,now(),now())",
@@ -107,6 +167,10 @@ public class CoreWorkflowService {
                 && Boolean.TRUE.equals(jdbc.queryForObject("SELECT EXISTS(SELECT 1 FROM theses WHERE phase_id=?)", Boolean.class, id)))
             throw new IllegalArgumentException("Đợt đã có sinh viên đăng ký, không được chuyển sang học kỳ khác");
         requireAvailableSemester(semesterId, id);
+        validateWithinSemester(semesterId,opens,closes,"Thời gian đăng ký đợt phải nằm trong học kỳ đã chọn");
+        for (var slot : jdbc.queryForList("SELECT opens_at,closes_at FROM round_step_windows WHERE round_id=?",id))
+            validateWithinSemester(semesterId,RoundReminderService.asOffset(slot.get("opens_at")),RoundReminderService.asOffset(slot.get("closes_at")),
+                    "Học kỳ mới phải bao gồm tất cả mốc thời gian đã thiết lập");
         if (jdbc.update("UPDATE thesis_rounds SET name=?,active=?,semester_id=?,registration_opens_at=?,registration_closes_at=?,last_modified_date=now() WHERE id=?",
                 name,active,semesterId,opens,closes,id)==0) throw new IllegalArgumentException("Không tìm thấy đợt ĐATN");
     }
@@ -121,6 +185,12 @@ public class CoreWorkflowService {
     private void validateDates(OffsetDateTime opens, OffsetDateTime closes) {
         if (opens == null || closes == null || !opens.isBefore(closes))
             throw new IllegalArgumentException("Mốc mở/đóng đăng ký không hợp lệ");
+    }
+    private void validateWithinSemester(String semesterId,OffsetDateTime opens,OffsetDateTime closes,String message) {
+        var semesters=jdbc.queryForList("SELECT starts_on,ends_on FROM semesters WHERE id=? FOR UPDATE",semesterId);
+        if (semesters.isEmpty()) throw new IllegalArgumentException("Không tìm thấy học kỳ");
+        var semester=semesters.getFirst();
+        CalendarDateRange.validate(opens,closes,asDate(semester.get("starts_on")),asDate(semester.get("ends_on")),message);
     }
     private void validateRound(String code,String name,String semesterId) {
         if (code==null || code.isBlank() || name==null || name.isBlank() || semesterId==null || semesterId.isBlank())
@@ -255,10 +325,10 @@ public class CoreWorkflowService {
                     ? configured : i+1<steps.size()?(String)steps.get(i+1).get("step_key"):"end";
             if (step.get("kind").equals("REVIEW")) {
                 xml.append(flow(id,"gate_"+id,null));
-                xml.append(flow("gate_"+id,next,"${approved == true}"));
+                xml.append(flow("gate_"+id,next,"${approved == true}","approved"));
                 String back=step.get("reject_key") instanceof String rejected && !rejected.isBlank()
                         ? rejected : first;
-                xml.append(flow("gate_"+id,back,"${approved == false}"));
+                xml.append(flow("gate_"+id,back,"${approved == false}","rejected"));
             } else xml.append(flow(id,next,null));
         }
         return xml.append("</process></definitions>").toString();
@@ -308,8 +378,10 @@ public class CoreWorkflowService {
         if (!canFinish.containsAll(byKey.keySet()))
             throw new IllegalArgumentException("Quy trình có nhánh mắc kẹt, không có đường tới kết thúc");
     }
-    private String flow(String from,String to,String condition) {
-        String id="f_"+from+"_"+to;
+    private String flow(String from,String to,String condition) { return flow(from,to,condition,null); }
+    private String flow(String from,String to,String condition,String suffix) {
+        // suffix keeps IDs unique when approve and reject branches target the same step
+        String id="f_"+from+"_"+to+(suffix==null?"":"_"+suffix);
         return "<sequenceFlow id=\""+id+"\" sourceRef=\""+from+"\" targetRef=\""+to+"\">"+
                 (condition==null?"":"<conditionExpression xmlns:xsi=\"http://www.w3.org/2001/XMLSchema-instance\" xsi:type=\"tFormalExpression\"><![CDATA["+condition+"]]></conditionExpression>")+"</sequenceFlow>";
     }

@@ -13,7 +13,7 @@ import com.example.graduationprocessbe.service.AuditLogService;
 import com.example.graduationprocessbe.service.CurrentUserService;
 import com.example.graduationprocessbe.service.ThesisProcessService;
 import com.example.graduationprocessbe.service.WorkflowPresentationService;
-import com.example.graduationprocessbe.service.WorkflowMailService;
+import com.example.graduationprocessbe.service.NotificationService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.flowable.engine.RuntimeService;
@@ -26,7 +26,6 @@ import org.springframework.transaction.annotation.Transactional;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.security.access.AccessDeniedException;
 
-import java.time.ZoneId;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -52,7 +51,10 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
     private final JdbcTemplate jdbc;
     private final com.example.graduationprocessbe.service.PermissionGuard permissionGuard;
     private final WorkflowPresentationService presentation;
-    private final WorkflowMailService workflowMail;
+    private final NotificationService notifications;
+
+    private static final ZoneId VN = ZoneId.of("Asia/Ho_Chi_Minh");
+    private static final DateTimeFormatter DATE_TIME = DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm");
 
     @Override
     @Transactional
@@ -478,58 +480,63 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
         return response(thesis);
     }
 
+    /** Notifies whoever must act on the next step: the assignee, the candidate users, or everyone holding the step's role. */
     private void enqueueNextTask(Thesis thesis) {
         List<Task> active=taskService.createTaskQuery().processInstanceId(thesis.getProcessInstanceId()).active().list();
         if (active.isEmpty()) return;
         Task next=active.getFirst();
-        var round=jdbc.queryForMap("SELECT name FROM thesis_rounds WHERE id=?",thesis.getPhaseId());
-        String roundName=(String)round.get("name");
-        String deadline=next.getDueDate()==null ? "Theo lịch của đợt" : next.getDueDate().toInstant()
-                .atZone(ZoneId.of("Asia/Ho_Chi_Minh")).format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"));
+        var roles=jdbc.queryForList("SELECT assignee_role FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id " +
+                "WHERE wt.process_definition_id=? AND ws.step_key=?",String.class,next.getProcessDefinitionId(),next.getTaskDefinitionKey());
+        String role=roles.isEmpty() ? null : roles.getFirst();
         List<String> recipients;
-        if (next.getAssignee()!=null) {
-            recipients=jdbc.queryForList("SELECT email FROM users WHERE id=? AND status='ACTIVE'",String.class,next.getAssignee());
-        } else {
-            var roles=jdbc.queryForList("SELECT assignee_role FROM workflow_steps ws JOIN workflow_templates wt ON wt.id=ws.template_id " +
-                    "WHERE wt.process_definition_id=? AND ws.step_key=?",String.class,next.getProcessDefinitionId(),next.getTaskDefinitionKey());
-            if (roles.isEmpty()) return;
-            String role=roles.getFirst();
-            if ("STUDENT".equals(role))
-                recipients=jdbc.queryForList("SELECT DISTINCT u.email FROM members m JOIN users u ON u.id=m.user_id " +
-                        "WHERE m.thesis_id=? AND u.status='ACTIVE'",String.class,thesis.getId());
-            else recipients=jdbc.queryForList("SELECT DISTINCT u.email FROM user_roles ur JOIN roles r ON r.id=ur.role_id " +
-                    "JOIN users u ON u.id=ur.user_id WHERE r.role_code=? AND u.status='ACTIVE' " +
-                    "AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",String.class,role,thesis.getPhaseId());
+        if (next.getAssignee()!=null) recipients=List.of(next.getAssignee());
+        else {
+            recipients=taskService.getIdentityLinksForTask(next.getId()).stream()
+                    .map(link -> link.getUserId()).filter(java.util.Objects::nonNull).distinct().toList();
+            if (recipients.isEmpty() && role!=null) recipients=switch (role) {
+                case "STUDENT" -> jdbc.queryForList("SELECT DISTINCT user_id FROM members WHERE thesis_id=?",String.class,thesis.getId());
+                case "LECTURER" -> jdbc.queryForList("SELECT lecturer_id FROM theses WHERE id=? AND lecturer_id IS NOT NULL",String.class,thesis.getId());
+                default -> jdbc.queryForList("SELECT DISTINCT ur.user_id FROM user_roles ur JOIN roles r ON r.id=ur.role_id " +
+                        "WHERE r.role_code=? AND (ur.thesis_round_id IS NULL OR ur.thesis_round_id=?)",String.class,role,thesis.getPhaseId());
+            };
         }
-        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),next.getTaskDefinitionKey(),
-                "NEXT_"+next.getId(),recipient,"[ĐATN] Việc cần xử lý: "+next.getName(),
-                "Hồ sơ “"+thesis.getTitle()+"” đã đến bước cần xử lý.",roundName,next.getName(),deadline);
+        if (recipients.isEmpty()) return;
+        var vars=caseVars(thesis,next.getName());
+        vars.put("hanChot",next.getDueDate()==null ? "Theo lịch của đợt" : next.getDueDate().toInstant()
+                .atZone(VN).format(DATE_TIME));
+        notifications.publish(NotificationService.Notice.of("TASK_NEXT","TASK",thesis.getPhaseId(),next.getTaskDefinitionKey(),
+                "NEXT_"+next.getId(),recipients,vars,"STUDENT".equals(role) ? "/student/progress" : "/tasks"));
     }
 
     private void enqueueCaseFeedback(Thesis thesis, Task task, boolean approved, String comment) {
-        String roundName=jdbc.queryForObject("SELECT name FROM thesis_rounds WHERE id=?",String.class,thesis.getPhaseId());
-        List<String> recipients=jdbc.queryForList("SELECT DISTINCT email FROM users WHERE id IN " +
-                "(SELECT user_id FROM members WHERE thesis_id=? UNION SELECT lecturer_id FROM theses WHERE id=?) " +
-                "AND status='ACTIVE'",String.class,thesis.getId(),thesis.getId());
-        String message="Hồ sơ “"+thesis.getTitle()+"”: "+(approved ? "đã được duyệt." : "cần chỉnh sửa.") +
-                (comment.isBlank() ? "" : "\nNhận xét: "+comment);
-        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),task.getTaskDefinitionKey(),
-                "DONE_"+task.getId(),recipient,"[ĐATN] Kết quả: "+task.getName(),message,
-                roundName,task.getName(),"—");
+        var vars=caseVars(thesis,task.getName());
+        vars.put("ketQua",approved ? "đã được duyệt" : "cần chỉnh sửa");
+        vars.put("nhanXet",comment==null || comment.isBlank() ? "Không có" : comment);
+        notifications.publish(NotificationService.Notice.of("CASE_RESULT","RESULT",thesis.getPhaseId(),task.getTaskDefinitionKey(),
+                "DONE_"+task.getId(),caseParticipants(thesis),vars,"/student/progress"));
     }
 
     private void enqueueDefenseSchedule(Thesis thesis, Task task, Map<String,Object> vars) {
-        String roundName=jdbc.queryForObject("SELECT name FROM thesis_rounds WHERE id=?",String.class,thesis.getPhaseId());
-        List<String> recipients=jdbc.queryForList("SELECT DISTINCT email FROM users WHERE id IN " +
-                "(SELECT user_id FROM members WHERE thesis_id=? UNION SELECT lecturer_id FROM theses WHERE id=?) " +
-                "AND status='ACTIVE'",String.class,thesis.getId(),thesis.getId());
-        String deadline=OffsetDateTime.parse((String)vars.get("defenseAt"))
-                .atZoneSameInstant(ZoneId.of("Asia/Ho_Chi_Minh")).format(DateTimeFormatter.ofPattern("dd/MM/yyyy HH:mm"));
-        String message="Lịch bảo vệ hồ sơ “"+thesis.getTitle()+"” đã được công bố. Phòng: "+vars.get("room")+
-                ". Hội đồng: "+vars.get("councilName")+".";
-        for (String recipient:recipients) workflowMail.enqueue(thesis.getPhaseId(),task.getTaskDefinitionKey(),
-                "SCHEDULE_"+task.getId(),recipient,"[ĐATN] Lịch bảo vệ đồ án",message,
-                roundName,task.getName(),deadline);
+        var values=caseVars(thesis,task.getName());
+        values.put("hanChot",OffsetDateTime.parse((String)vars.get("defenseAt")).atZoneSameInstant(VN).format(DATE_TIME));
+        values.put("phong",String.valueOf(vars.get("room")));
+        values.put("hoiDong",String.valueOf(vars.get("councilName")));
+        notifications.publish(NotificationService.Notice.of("DEFENSE_SCHEDULE","DEFENSE",thesis.getPhaseId(),task.getTaskDefinitionKey(),
+                "SCHEDULE_"+task.getId(),caseParticipants(thesis),values,"/student/progress"));
+    }
+
+    private Map<String,String> caseVars(Thesis thesis, String stepName) {
+        var vars=new HashMap<String,String>();
+        vars.put("tenDot",jdbc.queryForObject("SELECT name FROM thesis_rounds WHERE id=?",String.class,thesis.getPhaseId()));
+        vars.put("tenMoc",stepName);
+        vars.put("tenHoSo",thesis.getTitle()==null ? "" : thesis.getTitle());
+        return vars;
+    }
+
+    /** Students of the thesis plus its supervisor. */
+    private List<String> caseParticipants(Thesis thesis) {
+        return jdbc.queryForList("SELECT user_id FROM members WHERE thesis_id=? UNION SELECT lecturer_id FROM theses " +
+                "WHERE id=? AND lecturer_id IS NOT NULL",String.class,thesis.getId(),thesis.getId());
     }
 
     /** currentStatus = taskDefinitionKey của task đang chờ, hoặc COMPLETED khi process kết thúc. */

@@ -812,10 +812,10 @@ BEGIN
         path=EXCLUDED.path, sort_order=EXCLUDED.sort_order, permission_code=EXCLUDED.permission_code, active=true, last_modified_date=now();
     -- Student screen for completing SUBMIT steps (midterm/final report, optional PDF attachment).
     INSERT INTO menus (id, parent_id, code, label, icon, path, sort_order, permission_code, active, created_date, last_modified_date)
-    SELECT gen_random_uuid()::text, parent.id, 'nop-bao-cao', 'Nộp báo cáo', 'UploadOutlined', '/student/submit', 34, 'VIEW_TAC_VU_QUY_TRINH', true, now(), now()
+    SELECT gen_random_uuid()::text, parent.id, 'nop-bao-cao', 'Nộp báo cáo', 'UploadOutlined', '/student/submit', 34, NULL, true, now(), now()
     FROM menus parent WHERE parent.code='do-an-cua-toi'
     ON CONFLICT (code) DO UPDATE SET parent_id=EXCLUDED.parent_id, label=EXCLUDED.label, icon=EXCLUDED.icon,
-        path=EXCLUDED.path, sort_order=EXCLUDED.sort_order, permission_code=EXCLUDED.permission_code, active=true, last_modified_date=now();
+        path=EXCLUDED.path, sort_order=EXCLUDED.sort_order, active=true, last_modified_date=now();
     UPDATE menus SET label='Giảng viên hướng dẫn' WHERE code='ho-so-de-tai-giang-vien';
     UPDATE menus SET label='Đề tài hướng dẫn' WHERE code='ho-so-cho-duyet';
     UPDATE menus SET label='Duyệt hồ sơ Khoa' WHERE code='ho-so-tien-do';
@@ -1314,6 +1314,11 @@ END $admin_child_menu_permissions_v2$;
 
 -- Optional workflow demo catalogue. Scenario execution stays in DemoDataSeeder so
 -- processes, tasks and history are created through Flowable, never by SQL inserts.
+-- The date columns must exist before the optional demo inserts on upgraded databases.
+ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS starts_on date;
+ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS ends_on date;
+ALTER TABLE semesters ADD COLUMN IF NOT EXISTS starts_on date;
+ALTER TABLE semesters ADD COLUMN IF NOT EXISTS ends_on date;
 DO $workflow_demo_catalog$
 DECLARE
   demo_year integer := extract(year FROM current_date)::integer;
@@ -1349,11 +1354,11 @@ BEGIN
   WHERE (u.username IN ('demo.lecturer','khoa','committee') OR u.username IN (SELECT 'demo.student.'||n FROM generate_series(1,15) n))
     AND NOT EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.thesis_round_id IS NULL);
 
-  INSERT INTO academic_years(id,code,start_year,end_year)
-    VALUES(gen_random_uuid()::text,demo_year||'-'||(demo_year+1),demo_year,demo_year+1)
+  INSERT INTO academic_years(id,code,start_year,end_year,starts_on,ends_on)
+    VALUES(gen_random_uuid()::text,demo_year||'-'||(demo_year+1),demo_year,demo_year+1,make_date(demo_year,9,1),make_date(demo_year+1,8,31))
     ON CONFLICT(code) DO NOTHING;
-  INSERT INTO semesters(id,academic_year_id,number)
-    SELECT gen_random_uuid()::text,y.id,3 FROM academic_years y WHERE y.code=demo_year||'-'||(demo_year+1)
+  INSERT INTO semesters(id,academic_year_id,number,starts_on,ends_on)
+    SELECT gen_random_uuid()::text,y.id,3,make_date(demo_year+1,5,1),make_date(demo_year+1,8,31) FROM academic_years y WHERE y.code=demo_year||'-'||(demo_year+1)
     ON CONFLICT(academic_year_id,number) DO NOTHING;
   INSERT INTO thesis_rounds(id,code,name,semester_id,active,registration_opens_at,registration_closes_at,created_date,last_modified_date)
     SELECT gen_random_uuid()::text,'DEMO-WORKFLOW-'||demo_year,'Đợt đồ án học kỳ 3 - '||demo_year,s.id,true,
@@ -1608,3 +1613,317 @@ BEGIN
     UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code='STUDENT';
     INSERT INTO app_seed_versions(version) VALUES('retire-submit-menu-v1');
 END $retire_submit_menu_v1$;
+
+-- Notifications: in-app inbox, admin-editable mail templates, CC/BCC, priority and a terminal FAILED state.
+DO $notification_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261022,1);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='notification-v1') THEN RETURN; END IF;
+    CREATE TABLE IF NOT EXISTS notifications (
+        id varchar(36) PRIMARY KEY,
+        user_id varchar(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        title varchar(255) NOT NULL,
+        body text NOT NULL,
+        link varchar(500),
+        priority varchar(10) NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('HIGH','NORMAL','LOW')),
+        category varchar(30) NOT NULL,
+        ref_key varchar(200) NOT NULL,
+        read_at timestamptz,
+        created_at timestamptz NOT NULL DEFAULT now(),
+        UNIQUE(user_id,ref_key)
+    );
+    CREATE INDEX IF NOT EXISTS ix_notifications_inbox ON notifications(user_id,read_at,created_at DESC);
+    CREATE TABLE IF NOT EXISTS notification_templates (
+        code varchar(40) PRIMARY KEY,
+        name varchar(150) NOT NULL,
+        description text,
+        priority varchar(10) NOT NULL DEFAULT 'NORMAL' CHECK(priority IN ('HIGH','NORMAL','LOW')),
+        subject varchar(255) NOT NULL,
+        body text NOT NULL,
+        default_subject varchar(255) NOT NULL,
+        default_body text NOT NULL,
+        updated_by varchar(36),
+        updated_at timestamptz NOT NULL DEFAULT now()
+    );
+    INSERT INTO notification_templates(code,name,description,priority,subject,body,default_subject,default_body)
+    SELECT code,name,description,priority,subject,body,subject,body FROM (VALUES
+      ('STEP_OPEN','Mở mốc','Gửi khi một mốc của đợt bắt đầu (nếu admin chưa tạo thông báo riêng cho mốc đó).','NORMAL',
+       '[ĐATN] Mở {{tenMoc}} – {{tenDot}}',
+       E'Chào {{tenNguoiNhan}},\n\nMốc “{{tenMoc}}” của {{tenDot}} đã mở từ {{batDau}} đến hết {{hanChot}}.\nVui lòng đăng nhập hệ thống để thực hiện đúng hạn.'),
+      ('STEP_BEFORE','Nhắc trước hạn','Gửi trước hạn chót theo số giờ cấu hình của đợt.','HIGH',
+       '[ĐATN] Sắp đến hạn: {{tenMoc}}',
+       E'Chào {{tenNguoiNhan}},\n\nMốc “{{tenMoc}}” của {{tenDot}} sẽ đóng lúc {{hanChot}}.\nVui lòng hoàn thành trước thời hạn.'),
+      ('STEP_OVERDUE','Quá hạn','Gửi sau hạn chót theo số giờ cấu hình của đợt.','HIGH',
+       '[ĐATN] Đã quá hạn: {{tenMoc}}',
+       E'Chào {{tenNguoiNhan}},\n\nMốc “{{tenMoc}}” của {{tenDot}} đã quá hạn từ {{hanChot}}.\nVui lòng liên hệ khoa nếu bạn cần được hỗ trợ.'),
+      ('TASK_NEXT','Việc cần xử lý','Gửi cho người phải xử lý bước tiếp theo của hồ sơ. Biến thêm: {{tenHoSo}}.','NORMAL',
+       '[ĐATN] Việc cần xử lý: {{tenMoc}}',
+       E'Chào {{tenNguoiNhan}},\n\nHồ sơ “{{tenHoSo}}” đã đến bước “{{tenMoc}}” và đang chờ bạn xử lý.\nThời hạn: {{hanChot}}.'),
+      ('CASE_RESULT','Kết quả duyệt','Gửi cho sinh viên và giảng viên hướng dẫn khi một bước duyệt có kết quả. Biến thêm: {{tenHoSo}}, {{ketQua}}, {{nhanXet}}.','NORMAL',
+       '[ĐATN] Kết quả: {{tenMoc}}',
+       E'Chào {{tenNguoiNhan}},\n\nHồ sơ “{{tenHoSo}}” {{ketQua}} ở bước “{{tenMoc}}”.\nNhận xét: {{nhanXet}}'),
+      ('DEFENSE_SCHEDULE','Lịch bảo vệ','Gửi khi lịch bảo vệ được công bố. Biến thêm: {{tenHoSo}}, {{phong}}, {{hoiDong}}.','HIGH',
+       '[ĐATN] Lịch bảo vệ đồ án',
+       E'Chào {{tenNguoiNhan}},\n\nLịch bảo vệ hồ sơ “{{tenHoSo}}” đã được công bố.\nThời gian: {{hanChot}}\nPhòng: {{phong}}\nHội đồng: {{hoiDong}}')
+    ) AS t(code,name,description,priority,subject,body)
+    ON CONFLICT(code) DO NOTHING;
+    ALTER TABLE workflow_mail_outbox ADD COLUMN IF NOT EXISTS recipient_user_id varchar(36);
+    ALTER TABLE workflow_mail_outbox ADD COLUMN IF NOT EXISTS cc text;
+    ALTER TABLE workflow_mail_outbox ADD COLUMN IF NOT EXISTS bcc text;
+    ALTER TABLE workflow_mail_outbox ADD COLUMN IF NOT EXISTS priority varchar(10) NOT NULL DEFAULT 'NORMAL';
+    UPDATE workflow_mail_outbox SET status='FAILED' WHERE status='PENDING' AND attempts>=5;
+    CREATE INDEX IF NOT EXISTS ix_workflow_mail_due ON workflow_mail_outbox(status,next_attempt_at);
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS audience varchar(20) NOT NULL DEFAULT 'STUDENT';
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS step_key varchar(60);
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS priority varchar(10) NOT NULL DEFAULT 'NORMAL';
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS cc text;
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS bcc text;
+    ALTER TABLE round_mail_campaigns ADD COLUMN IF NOT EXISTS created_by varchar(36);
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'cau-hinh-thong-bao','Cấu hình thông báo','MailOutlined','/notifications/settings',NULL,136,true,now(),now())
+    ON CONFLICT(code) DO NOTHING;
+    INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'VIEW_CAU_HINH_THONG_BAO','Truy cập / Xem: Cấu hình thông báo',
+        'MENU','cau-hinh-thong-bao','VIEW',true,now(),now()) ON CONFLICT(code) DO NOTHING;
+    UPDATE menus SET permission_code='VIEW_CAU_HINH_THONG_BAO' WHERE code='cau-hinh-thong-bao';
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE p.code='VIEW_CAU_HINH_THONG_BAO' AND r.role_code='ADMIN' ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE p.code='VIEW_CAU_HINH_THONG_BAO' AND r.role_code='ADMIN' ON CONFLICT(role_id,permission_id) DO NOTHING;
+    INSERT INTO menu_actor_visibility(menu_code,user_type) VALUES('cau-hinh-thong-bao','ADMIN') ON CONFLICT DO NOTHING;
+    UPDATE roles SET permissions_version=permissions_version+1 WHERE role_code='ADMIN';
+    INSERT INTO app_seed_versions(version) VALUES('notification-v1');
+END $notification_v1$;
+
+-- Lean navigation for the standard thesis workflow demo: single-child groups are flattened,
+-- duplicate / off-flow screens leave the menu, and the admin-only settings share one group.
+-- Menus are only re-parented or deactivated (never deleted) so permissions and routes stay valid.
+DO $lean_navigation_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023,1);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='lean-navigation-v1') THEN RETURN; END IF;
+    -- Student / lecturer groups that had a single child become one top-level entry.
+    UPDATE menus SET parent_id=NULL,label='Tìm giảng viên',sort_order=20,last_modified_date=now() WHERE code='ds-giang-vien';
+    UPDATE menus SET parent_id=NULL,label='Thông tin giảng viên',sort_order=50,last_modified_date=now() WHERE code='ho-so-giang-vien';
+    UPDATE menus SET active=false,last_modified_date=now() WHERE code IN ('tim-giang-vien-de-tai','ho-so-de-tai-giang-vien');
+    INSERT INTO menu_actor_visibility(menu_code,user_type) VALUES('ds-giang-vien','STUDENT'),('ho-so-giang-vien','LECTURER')
+        ON CONFLICT DO NOTHING;
+    -- Faculty review group: keep the two screens used by the demo flow.
+    UPDATE menus SET active=false,last_modified_date=now() WHERE code IN ('duyet-de-cuong','trung-lap');
+    UPDATE menus SET sort_order=91,last_modified_date=now() WHERE code='duyet-de-cuong-khoa';
+    UPDATE menus SET label='Theo dõi hồ sơ',sort_order=92,last_modified_date=now() WHERE code='ds-ho-so-tien-do';
+    -- Lecturer guidance flow order: appraise proposal, confirm guidance, review documents.
+    UPDATE menus SET sort_order=61,last_modified_date=now() WHERE code='duyet-de-cuong-gvhd';
+    UPDATE menus SET sort_order=62,last_modified_date=now() WHERE code='xac-nhan-huong-dan';
+    UPDATE menus SET sort_order=63,last_modified_date=now() WHERE code='ho-so-cho-duyet';
+    -- Admin-only settings share one group instead of two single-screen roots.
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'cau-hinh-he-thong','Cấu hình hệ thống','SettingOutlined','/system',NULL,160,true,now(),now())
+    ON CONFLICT(code) DO UPDATE SET active=true,parent_id=NULL,sort_order=160,last_modified_date=now();
+    INSERT INTO menu_actor_visibility(menu_code,user_type) VALUES('cau-hinh-he-thong','ADMIN') ON CONFLICT DO NOTHING;
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='cau-hinh-he-thong'),sort_order=161,last_modified_date=now() WHERE code='mau-van-ban';
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='cau-hinh-he-thong'),sort_order=162,last_modified_date=now() WHERE code='cau-hinh-thong-bao';
+    -- Top-level order: overview, student, lecturer, faculty, admin.
+    UPDATE menus SET sort_order=v.ord,last_modified_date=now()
+    FROM (VALUES ('tong-quan',10),('do-an-cua-toi',30),('huong-dan-do-an',60),('dot-do-an',70),('ho-so-tien-do',90),
+        ('cau-hinh-quy-trinh',120),('nguoi-dung-phan-quyen',140),('bao-cao-thong-ke',150)) v(code,ord)
+    WHERE menus.code=v.code;
+    -- Consistent Vietnamese labels: parent = area, child = action.
+    UPDATE menus SET label=v.lbl,last_modified_date=now()
+    FROM (VALUES ('do-an-cua-toi','Đồ án của tôi'),('tien-trinh-do-an','Tiến độ đồ án'),('ho-so-giang-vien','Hồ sơ giảng viên'),
+        ('ho-so-cho-duyet','Duyệt hồ sơ nộp'),('ds-dot-do-an','Danh sách đợt'),('ho-so-tien-do','Hồ sơ & duyệt (Khoa)'),
+        ('duyet-de-cuong-khoa','Duyệt đề cương'),('bao-cao-thong-ke','Báo cáo & thống kê'),('bao-cao-tien-do','Thống kê tiến độ'),
+        ('nguoi-dung-phan-quyen','Người dùng & phân quyền'),('users','Người dùng'),('roles','Vai trò & phân quyền'),
+        ('user-permissions','Phân quyền người dùng'),('menus','Cấu hình menu')) v(code,lbl)
+    WHERE menus.code=v.code;
+    UPDATE permissions p SET name='Truy cập / Xem: ' || m.label,last_modified_date=now()
+    FROM menus m WHERE p.menu_code=m.code AND p.action='VIEW';
+    UPDATE roles SET permissions_version=permissions_version+1;
+    INSERT INTO app_seed_versions(version) VALUES('lean-navigation-v1');
+END $lean_navigation_v1$;
+
+-- Three local login accounts. The username "lecture" uses the LECTURER role.
+-- Apply once to existing databases as well as new ones.
+DO $local_actor_accounts_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023, 2);
+    IF EXISTS (SELECT 1 FROM app_seed_versions WHERE version='local-actor-accounts-v1') THEN RETURN; END IF;
+
+    IF EXISTS (
+        SELECT 1 FROM users u
+        JOIN (VALUES ('admin','ADMIN'), ('student','STUDENT'), ('lecture','LECTURER')) v(username,user_type)
+          ON u.username=v.username
+        WHERE u.user_type<>v.user_type
+    ) THEN
+        RAISE EXCEPTION 'A local actor username belongs to an incompatible account type';
+    END IF;
+
+    INSERT INTO users(id,username,email,full_name,password_hash,user_type,status,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,v.username,v.username||'@graduation.local',v.full_name,
+        '$2a$10$ctVd2m8G2Nc2RRpYTyl6zOtBbasSqZsDt9WF1ysgY3z005.lDPSl.',v.user_type,'ACTIVE',now(),now()
+    FROM (VALUES
+        ('admin','Quản trị viên','ADMIN'),
+        ('student','Sinh viên','STUDENT'),
+        ('lecture','Giảng viên','LECTURER')
+    ) v(username,full_name,user_type)
+    ON CONFLICT(username) DO UPDATE SET password_hash=EXCLUDED.password_hash,last_modified_date=now();
+
+    INSERT INTO user_roles(id,user_id,role_id,thesis_round_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,u.id,r.id,NULL,now(),now()
+    FROM users u JOIN roles r ON r.role_code=CASE u.username WHEN 'lecture' THEN 'LECTURER' ELSE upper(u.username) END
+    WHERE u.username IN ('admin','student','lecture')
+      AND NOT EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.thesis_round_id IS NULL);
+
+    INSERT INTO app_seed_versions(version) VALUES('local-actor-accounts-v1');
+END $local_actor_accounts_v1$;
+
+-- Every top-level menu is a group with at least two screens: standalone root screens are merged
+-- into a neighbouring group so the sidebar never shows a parent with a single (or no) child.
+DO $grouped_navigation_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023,3);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='grouped-navigation-v1') THEN RETURN; END IF;
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'thong-tin-chung','Tổng quan','DashboardOutlined','/overview',NULL,10,true,now(),now())
+    ON CONFLICT(code) DO UPDATE SET active=true,parent_id=NULL,sort_order=10,last_modified_date=now();
+    -- Overview group: dashboard + lecturer directory (student/faculty) or lecturer profile.
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='thong-tin-chung'),sort_order=11,label='Bảng điều khiển',last_modified_date=now() WHERE code='tong-quan';
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='thong-tin-chung'),sort_order=12,label='Tìm giảng viên',last_modified_date=now() WHERE code='ds-giang-vien';
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='thong-tin-chung'),sort_order=13,label='Hồ sơ giảng viên',last_modified_date=now() WHERE code='ho-so-giang-vien';
+    DELETE FROM menu_actor_visibility WHERE menu_code IN ('ds-giang-vien','ho-so-giang-vien');
+    -- Workflow configuration joins the round-management group.
+    UPDATE menus SET parent_id=(SELECT id FROM menus WHERE code='dot-do-an'),sort_order=75,last_modified_date=now() WHERE code='cau-hinh-quy-trinh';
+    -- Faculty staff and committee also browse the lecturer directory so their overview group has two screens.
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code IN ('FACULTY_STAFF','COMMITTEE') AND p.code='VIEW_DS_GIANG_VIEN'
+    ON CONFLICT DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code IN ('FACULTY_STAFF','COMMITTEE') AND p.code='VIEW_DS_GIANG_VIEN'
+    ON CONFLICT DO NOTHING;
+    UPDATE permissions p SET name='Truy cập / Xem: ' || m.label,last_modified_date=now()
+    FROM menus m WHERE p.menu_code=m.code AND p.action='VIEW';
+    UPDATE roles SET permissions_version=permissions_version+1;
+    INSERT INTO app_seed_versions(version) VALUES('grouped-navigation-v1');
+END $grouped_navigation_v1$;
+
+-- Committee members get their own group so the role has real screens in the demo flow
+-- (scoring / defense tasks are the workflow steps assigned to the COMMITTEE role).
+DO $committee_navigation_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023,4);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='committee-navigation-v1') THEN RETURN; END IF;
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,active,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'hoi-dong-bao-ve','Hội đồng bảo vệ','ScheduleOutlined','/committee',NULL,80,true,now(),now())
+    ON CONFLICT(code) DO UPDATE SET active=true,parent_id=NULL,sort_order=80,last_modified_date=now();
+    INSERT INTO permissions(id,code,name,module,menu_code,action,enabled,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,'VIEW_'||upper(replace(v.code,'-','_')),'Truy cập / Xem: '||v.label,'MENU',v.code,'VIEW',true,now(),now()
+    FROM (VALUES ('hoi-dong-cua-toi','Nhiệm vụ hội đồng'),('lich-bao-ve-phan-cong','Lịch bảo vệ'),('cham-diem-hoi-dong','Chấm điểm bảo vệ')) v(code,label)
+    ON CONFLICT(code) DO NOTHING;
+    INSERT INTO menus(id,code,label,icon,path,parent_id,sort_order,permission_code,active,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,v.code,v.label,'FileTextOutlined',v.path,(SELECT id FROM menus WHERE code='hoi-dong-bao-ve'),v.ord,
+           'VIEW_'||upper(replace(v.code,'-','_')),true,now(),now()
+    FROM (VALUES ('hoi-dong-cua-toi','Nhiệm vụ hội đồng','/committee/my/list',81),
+                 ('lich-bao-ve-phan-cong','Lịch bảo vệ','/committee/my/schedule',82),
+                 ('cham-diem-hoi-dong','Chấm điểm bảo vệ','/committee/scoring',83)) v(code,label,path,ord)
+    ON CONFLICT(code) DO UPDATE SET active=true,parent_id=EXCLUDED.parent_id,path=EXCLUDED.path,label=EXCLUDED.label,
+        sort_order=EXCLUDED.sort_order,permission_code=EXCLUDED.permission_code,last_modified_date=now();
+    INSERT INTO role_allowed_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code IN ('COMMITTEE','ADMIN') AND p.menu_code IN ('hoi-dong-cua-toi','lich-bao-ve-phan-cong','cham-diem-hoi-dong') ON CONFLICT DO NOTHING;
+    INSERT INTO role_permissions(id,role_id,permission_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,r.id,p.id,now(),now() FROM roles r CROSS JOIN permissions p
+    WHERE r.role_code IN ('COMMITTEE','ADMIN') AND p.menu_code IN ('hoi-dong-cua-toi','lich-bao-ve-phan-cong','cham-diem-hoi-dong') ON CONFLICT DO NOTHING;
+    UPDATE roles SET permissions_version=permissions_version+1;
+    INSERT INTO app_seed_versions(version) VALUES('committee-navigation-v1');
+END $committee_navigation_v1$;
+
+-- Demo account for the COMMITTEE role (lecturer account type, same local password as the other demo accounts).
+DO $committee_account_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023, 5);
+    IF EXISTS (SELECT 1 FROM app_seed_versions WHERE version='committee-account-v1') THEN RETURN; END IF;
+
+    IF EXISTS (SELECT 1 FROM users WHERE username='committee' AND user_type<>'LECTURER') THEN
+        RAISE EXCEPTION 'Username committee belongs to an incompatible account type';
+    END IF;
+
+    INSERT INTO users(id,username,email,full_name,password_hash,user_type,status,created_date,last_modified_date)
+    VALUES(gen_random_uuid()::text,'committee','committee@graduation.local','Thành viên hội đồng',
+        '$2a$10$ctVd2m8G2Nc2RRpYTyl6zOtBbasSqZsDt9WF1ysgY3z005.lDPSl.','LECTURER','ACTIVE',now(),now())
+    ON CONFLICT(username) DO UPDATE SET password_hash=EXCLUDED.password_hash,last_modified_date=now();
+
+    INSERT INTO user_roles(id,user_id,role_id,thesis_round_id,created_date,last_modified_date)
+    SELECT gen_random_uuid()::text,u.id,r.id,NULL,now(),now()
+    FROM users u JOIN roles r ON r.role_code IN ('LECTURER','COMMITTEE')
+    WHERE u.username='committee'
+      AND NOT EXISTS (SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_id=r.id AND ur.thesis_round_id IS NULL);
+
+    INSERT INTO app_seed_versions(version) VALUES('committee-account-v1');
+END $committee_account_v1$;
+
+-- Existing calendars receive conventional dates once; administrators may edit them later.
+-- Three-semester years remain valid. No semester is renumbered or detached from a round.
+DO $academic_calendar_dates_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023, 6);
+    IF EXISTS (SELECT 1 FROM app_seed_versions WHERE version='academic-calendar-dates-v1') THEN RETURN; END IF;
+    ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS starts_on date;
+    ALTER TABLE academic_years ADD COLUMN IF NOT EXISTS ends_on date;
+    ALTER TABLE semesters ADD COLUMN IF NOT EXISTS starts_on date;
+    ALTER TABLE semesters ADD COLUMN IF NOT EXISTS ends_on date;
+    UPDATE academic_years SET starts_on=make_date(start_year,9,1) WHERE starts_on IS NULL;
+    UPDATE academic_years SET ends_on=make_date(end_year,8,31) WHERE ends_on IS NULL;
+    UPDATE semesters s SET starts_on=CASE s.number
+        WHEN 1 THEN y.starts_on
+        WHEN 2 THEN make_date(y.end_year,1,1)
+        ELSE make_date(y.end_year,5,1) END,
+        ends_on=CASE s.number
+        WHEN 1 THEN make_date(y.start_year,12,31)
+        WHEN 2 THEN make_date(y.end_year,4,30)
+        ELSE y.ends_on END
+    FROM academic_years y WHERE s.academic_year_id=y.id AND (s.starts_on IS NULL OR s.ends_on IS NULL);
+    ALTER TABLE academic_years ALTER COLUMN starts_on SET NOT NULL;
+    ALTER TABLE academic_years ALTER COLUMN ends_on SET NOT NULL;
+    ALTER TABLE semesters ALTER COLUMN starts_on SET NOT NULL;
+    ALTER TABLE semesters ALTER COLUMN ends_on SET NOT NULL;
+    ALTER TABLE academic_years ADD CONSTRAINT ck_academic_year_dates CHECK(starts_on<ends_on);
+    ALTER TABLE semesters ADD CONSTRAINT ck_semester_dates CHECK(starts_on<ends_on);
+    INSERT INTO app_seed_versions(version) VALUES('academic-calendar-dates-v1');
+END $academic_calendar_dates_v1$;
+
+DO $round_reminders_v2$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023, 7);
+    IF EXISTS (SELECT 1 FROM app_seed_versions WHERE version='round-reminders-v2') THEN RETURN; END IF;
+    ALTER TABLE round_step_windows ADD COLUMN IF NOT EXISTS before_open_hours integer NOT NULL DEFAULT 0 CHECK(before_open_hours BETWEEN 0 AND 720);
+    ALTER TABLE round_step_windows ADD COLUMN IF NOT EXISTS before_close_hours integer CHECK(before_close_hours BETWEEN 0 AND 720);
+    ALTER TABLE round_step_windows ADD COLUMN IF NOT EXISTS after_close_hours integer CHECK(after_close_hours BETWEEN 0 AND 720);
+    INSERT INTO notification_templates(code,name,description,priority,subject,body,default_subject,default_body)
+    VALUES('STEP_UPCOMING','Mốc sắp bắt đầu','Nhắc chuẩn bị trước ngày mở mốc.','NORMAL',
+      '[ĐATN] Sắp mở {{tenMoc}} – {{tenDot}}',
+      E'Chào {{tenNguoiNhan}},\n\nMốc {{tenMoc}} mở từ {{batDau}} đến {{hanChot}}. Vui lòng chuẩn bị và thực hiện đúng thời gian.',
+      '[ĐATN] Sắp mở {{tenMoc}} – {{tenDot}}',
+      E'Chào {{tenNguoiNhan}},\n\nMốc {{tenMoc}} mở từ {{batDau}} đến {{hanChot}}. Vui lòng chuẩn bị và thực hiện đúng thời gian.')
+    ON CONFLICT(code) DO NOTHING;
+    INSERT INTO app_seed_versions(version) VALUES('round-reminders-v2');
+END $round_reminders_v2$;
+
+DO $round_notification_students_v1$
+BEGIN
+    PERFORM pg_advisory_xact_lock(20261023, 8);
+    IF EXISTS(SELECT 1 FROM app_seed_versions WHERE version='round-notification-students-v1') THEN RETURN; END IF;
+    CREATE TABLE IF NOT EXISTS round_notification_students (
+        round_id varchar(36) NOT NULL REFERENCES thesis_rounds(id) ON DELETE CASCADE,
+        user_id varchar(36) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        PRIMARY KEY(round_id,user_id)
+    );
+    -- Preserve existing recipients once; subsequent audience edits are independent of applications.
+    INSERT INTO round_notification_students(round_id,user_id)
+    SELECT DISTINCT thesis_round_id,user_id FROM members WHERE thesis_round_id IS NOT NULL AND user_id IS NOT NULL
+    ON CONFLICT DO NOTHING;
+    INSERT INTO app_seed_versions(version) VALUES('round-notification-students-v1');
+END $round_notification_students_v1$;
