@@ -122,10 +122,9 @@ public class MenuServiceImpl implements MenuService {
         return result;
     }
 
-    /** "Đồ án đang thực hiện" stays disabled until the supervising lecturer has confirmed guidance for the student's thesis. */
+    /** "Đồ án đang thực hiện" stays disabled only until the student's thesis process has started (so its history can be viewed from the proposal stage on). */
     private void lockProgressUntilGuidance(List<MenuResponse> nodes, String userId, String roundId) {
-        String sql = "SELECT count(*) FROM theses t WHERE (t.guidance_approved = true OR (t.process_instance_id IS NOT NULL AND t.current_status NOT IN "
-                + "('submitProposal','reviewProposal','reviseProposal','advisorSignature','submitSignedProposal','facultyFinalApproval','registerThesis','confirmGuidance','GUIDANCE_REJECTED'))) "
+        String sql = "SELECT count(*) FROM theses t WHERE (t.guidance_approved = true OR (t.process_instance_id IS NOT NULL AND t.current_status <> 'GUIDANCE_REJECTED')) "
                 + "AND (t.student_id = ? OR EXISTS (SELECT 1 FROM members m WHERE m.thesis_id = t.id AND m.user_id = ?))"
                 + (roundId == null ? "" : " AND t.phase_id = ?");
         Object[] args = roundId == null ? new Object[]{userId, userId} : new Object[]{userId, userId, roundId};

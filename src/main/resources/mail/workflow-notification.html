@@ -1,17 +1,32 @@
 <!doctype html>
 <html lang="vi">
-<head><meta charset="utf-8"><title>Thông báo đồ án tốt nghiệp</title></head>
-<body style="margin:0;background:#f4f6fa;font-family:Arial,sans-serif;color:#172b4d">
-  <div style="max-width:640px;margin:32px auto;background:#fff;border:1px solid #dfe5ee;border-radius:10px;overflow:hidden">
-    <div style="background:#164e8a;color:#fff;padding:22px 28px;font-size:20px;font-weight:bold">Hệ thống Đồ án tốt nghiệp</div>
-    <div style="padding:28px;line-height:1.6">
-      <h1 style="font-size:20px;margin:0 0 16px">{{title}}</h1>
-      <p style="white-space:pre-line;margin:0 0 20px">{{message}}</p>
-      <p style="margin:0;color:#52657b">Đợt: <strong>{{roundName}}</strong></p>
-      <p style="margin:8px 0 0;color:#52657b">Bước: <strong>{{stepName}}</strong></p>
-      <p style="margin:8px 0 0;color:#52657b">Thời hạn: <strong>{{deadline}}</strong></p>
-    </div>
-    <div style="padding:16px 28px;background:#f4f6fa;color:#52657b;font-size:13px">Vui lòng đăng nhập hệ thống để xem hồ sơ và công việc liên quan.</div>
-  </div>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>{{title}}</title>
+</head>
+<body style="margin:0;padding:0;background:#eef1f6;font-family:'Segoe UI',Roboto,Arial,sans-serif;color:#1f2d3d">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#eef1f6;padding:32px 12px">
+    <tr><td align="center">
+      <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border:1px solid #dbe2ec;border-radius:8px;overflow:hidden">
+        <tr><td style="background:#164e8a;padding:24px 32px">
+          <div style="color:#ffffff;font-size:18px;font-weight:600;letter-spacing:.2px">Hệ thống quản lý Đồ án tốt nghiệp</div>
+          <div style="color:#b9d3ee;font-size:13px;margin-top:4px">Thông báo từ hệ thống</div>
+        </td></tr>
+        <tr><td style="padding:32px 32px 8px;line-height:1.65;font-size:15px">
+          <h1 style="font-size:19px;line-height:1.4;margin:0 0 20px;color:#10325a;font-weight:600">{{title}}</h1>
+          <div style="white-space:pre-line;margin:0 0 28px;color:#2b3a4d">{{message}}</div>
+          <div style="margin:0 0 28px">{{button}}</div>
+        </td></tr>
+        <tr><td style="padding:0 32px 28px;font-size:14px;line-height:1.6;color:#2b3a4d">
+          <div style="border-top:1px solid #e5eaf1;padding-top:18px">Trân trọng,<br><strong>Ban quản lý Đồ án tốt nghiệp</strong></div>
+        </td></tr>
+        <tr><td style="padding:18px 32px;background:#f6f8fb;color:#6b7b8f;font-size:12px;line-height:1.6;border-top:1px solid #e5eaf1">
+          Đây là email tự động, vui lòng không trả lời trực tiếp. Nếu bạn đã hoàn thành nội dung trên, xin bỏ qua email này.<br>
+          Mọi thắc mắc, vui lòng liên hệ Khoa quản lý đồ án.
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
 </body>
 </html>

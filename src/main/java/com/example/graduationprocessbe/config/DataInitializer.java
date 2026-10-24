@@ -3,6 +3,7 @@ package com.example.graduationprocessbe.config;
 import com.example.graduationprocessbe.entity.*;
 import com.example.graduationprocessbe.repository.*;
 import com.example.graduationprocessbe.service.CoreWorkflowService;
+import com.example.graduationprocessbe.service.FacultyWorkflowUpgrade;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.ApplicationArguments;
@@ -33,6 +34,7 @@ public class DataInitializer implements ApplicationRunner {
     private final PasswordEncoder passwordEncoder;
     private final DemoDataSeeder demoDataSeeder;
     private final CoreWorkflowService workflowService;
+    private final FacultyWorkflowUpgrade facultyWorkflowUpgrade;
 
     @Override
     @Transactional
@@ -54,6 +56,8 @@ public class DataInitializer implements ApplicationRunner {
         String baselineDefinition = jdbcTemplate.queryForObject(
                 "SELECT process_definition_id FROM workflow_templates WHERE id='core-template-v2'",String.class);
         if (baselineDefinition == null) workflowService.publish("core-template-v2");
+
+        facultyWorkflowUpgrade.apply();
 
         ensureUser("admin", "admin@graduation.local", "Quản trị viên Nguyễn Văn An", role("ADMIN"), "ADMIN");
         if (seedDemo) {

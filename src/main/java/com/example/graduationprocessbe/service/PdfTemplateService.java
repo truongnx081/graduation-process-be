@@ -71,8 +71,15 @@ public class PdfTemplateService {
      */
     public byte[] convertDocxToPdf(byte[] docx) {
         requireWordDocument(docx);
+        String sourceHash;
+        try {
+            sourceHash = java.util.HexFormat.of().formatHex(java.security.MessageDigest.getInstance("SHA-256").digest(docx));
+        } catch (java.security.NoSuchAlgorithmException ex) { throw new IllegalStateException(ex); }
+        List<byte[]> cached = jdbc.query("SELECT pdf FROM document_pdf_cache WHERE source_hash=?", (rs, row) -> rs.getBytes(1), sourceHash);
+        if (!cached.isEmpty()) return cached.getFirst();
         long started = System.currentTimeMillis();
         byte[] pdf = converter.convert(docx);
+        jdbc.update("INSERT INTO document_pdf_cache(source_hash,pdf) VALUES(?,?) ON CONFLICT DO NOTHING", sourceHash, pdf);
         log.info("Converted Word document to PDF: {} -> {} bytes in {} ms", docx.length, pdf.length, System.currentTimeMillis() - started);
         return pdf;
     }
