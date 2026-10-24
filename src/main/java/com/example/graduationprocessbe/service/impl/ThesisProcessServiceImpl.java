@@ -421,6 +421,8 @@ public class ThesisProcessServiceImpl implements ThesisProcessService {
                     throw new IllegalArgumentException("Cần nhập tên đề tài tiếng Anh");
             } else if (kind.equals("REVIEW")) {
                 permissionGuard.require("TASKS_APPROVE",thesis.getPhaseId());
+                // Review steps (Faculty/lecturer feedback) follow the window set on the round schedule too.
+                checkStepWindow(thesis.getPhaseId(),task.getTaskDefinitionKey());
                 if (!(vars.get("approved") instanceof Boolean approved)) throw new IllegalArgumentException("Cần chọn duyệt hoặc yêu cầu sửa");
                 String comment=String.valueOf(vars.getOrDefault("comment",""));
                 if (!approved && comment.isBlank()) throw new IllegalArgumentException("Cần ghi rõ nội dung yêu cầu sửa");

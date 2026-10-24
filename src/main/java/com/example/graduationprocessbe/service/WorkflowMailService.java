@@ -67,7 +67,7 @@ public class WorkflowMailService {
             if (link != null && !link.isBlank()) {
                 String url = absolute(link);
                 button = "<a href=\"" + escape(url) + "\" style=\"display:inline-block;background:#164e8a;color:#fff;" +
-                        "text-decoration:none;padding:10px 20px;border-radius:6px;font-weight:bold\">Mở hệ thống</a>";
+                        "text-decoration:none;padding:12px 28px;border-radius:6px;font-weight:600;font-size:15px\">Xem chi tiết trên hệ thống</a>";
             }
             return html.replace("{{title}}", escape(title)).replace("{{message}}", renderMessage(text)).replace("{{button}}", button);
         } catch (IOException ex) {
@@ -139,15 +139,33 @@ public class WorkflowMailService {
         return Arrays.stream(list.split(",")).map(String::trim).filter(s -> !s.isEmpty()).toArray(String[]::new);
     }
 
-    private static String escape(String value) {
+    static String escape(String value) {
         if (value == null) return "";
         return value.replace("&", "&amp;").replace("<", "&lt;")
                 .replace(">", "&gt;").replace("\"", "&quot;").replace("'", "&#39;");
     }
 
-    /** A small, escaped table syntax for plan emails; arbitrary HTML is never accepted. */
+    static boolean isRichText(String text) {
+        return text != null && java.util.regex.Pattern.compile("<(p|h[1-6]|table|ul|ol|blockquote)(\\s|>)", java.util.regex.Pattern.CASE_INSENSITIVE).matcher(text).find();
+    }
+
+    static String plainMessage(String text) {
+        return isRichText(text) ? org.jsoup.Jsoup.parse(renderMessage(text)).text() : text;
+    }
+
+    /** Allow only editor formatting; never keep scripts, user styles or event attributes. */
     static String renderMessage(String text) {
         if (text == null) return "";
+        if (isRichText(text)) {
+            var allowed = new org.jsoup.safety.Safelist()
+                    .addTags("p", "br", "h1", "h2", "h3", "h4", "h5", "h6", "strong", "b", "em", "i", "s", "ul", "ol", "li", "blockquote", "pre", "code", "hr", "table", "thead", "tbody", "tfoot", "tr", "th", "td", "a")
+                    .addAttributes("a", "href").addProtocols("a", "href", "https", "http", "mailto");
+            var document = org.jsoup.Jsoup.parseBodyFragment(org.jsoup.Jsoup.clean(text, allowed));
+            document.select("table").attr("style", "border-collapse:collapse;width:100%;margin:16px 0;white-space:normal");
+            document.select("th,td").attr("style", "border:1px solid #cbd5e1;padding:8px;text-align:left;vertical-align:top");
+            document.outputSettings().prettyPrint(false);
+            return document.body().html();
+        }
         var html = new StringBuilder();
         boolean table = false;
         boolean header = false;

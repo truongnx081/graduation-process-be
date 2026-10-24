@@ -71,7 +71,7 @@ public class RoundMailManagementService {
         vars.put("maSinhVien","Mã sinh viên");
         vars.put("link",mail.absolute("/dashboard"));
         String subject=NotificationService.render(input.subject(),vars);
-        String body=NotificationService.render(input.message(),vars);
+        String body=NotificationService.renderBody(input.message(),vars);
         var result=new HashMap<String,Object>();
         result.put("subject",subject);
         result.put("html",mail.render(subject,body,"/dashboard"));

@@ -109,10 +109,10 @@ public class NotificationService {
             vars.put("maSinhVien", username);
             vars.put("link", mail.absolute(n.link()));
             String title = WorkflowMailService.cut(render(subject, vars), 255);
-            String text = render(body, vars);
+            String text = renderBody(body, vars);
             int inserted = jdbc.update("INSERT INTO notifications(id,user_id,title,body,link,priority,category,ref_key) " +
                             "VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(user_id,ref_key) DO NOTHING",
-                    UUID.randomUUID().toString(), user.get("id"), title, text,
+                    UUID.randomUUID().toString(), user.get("id"), title, WorkflowMailService.plainMessage(text),
                     WorkflowMailService.cut(n.link(), 500), priority, n.category(), ref);
             if (inserted == 0) continue;
             created++;
@@ -180,6 +180,13 @@ public class NotificationService {
         while (m.find()) m.appendReplacement(out, Matcher.quoteReplacement(Objects.toString(vars.get(m.group(1)), "")));
         m.appendTail(out);
         return out.toString();
+    }
+
+    public static String renderBody(String template, Map<String, String> vars) {
+        if (!WorkflowMailService.isRichText(template)) return render(template, vars);
+        var escaped = new HashMap<String, String>();
+        vars.forEach((key, value) -> escaped.put(key, WorkflowMailService.escape(value)));
+        return render(template, escaped);
     }
 
     /** Rejects placeholders the system cannot fill so admins see the typo when saving. */
